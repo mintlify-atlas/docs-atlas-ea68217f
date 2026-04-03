@@ -1,0 +1,290 @@
+---
+title: "Configuration"
+description: "Configure Milvus using milvus.yaml, environment variables, and runtime overrides for storage, networking, logging, and more."
+---
+
+Milvus is configured primarily through `configs/milvus.yaml`. This page covers the sections you are most likely to change when deploying and operating Milvus.
+
+<Note>
+Set configuration values before starting Milvus for the first time when instructed. Changing certain values on a running instance (such as `etcd.rootPath` or `minio.rootPath`) will cause data access failures.
+</Note>
+
+## Configuration file location
+
+| Deployment | Default path |
+|---|---|
+| Docker Compose | `./volumes/milvus/configs/milvus.yaml` (bind-mounted) |
+| Kubernetes (Helm) | ConfigMap `milvus-config`, mounted at `/milvus/configs/milvus.yaml` |
+| Standalone binary | `configs/milvus.yaml` relative to the Milvus working directory |
+
+## Environment variable overrides
+
+Every parameter in `milvus.yaml` can be overridden by an environment variable. The override format is the YAML key path joined by underscores and uppercased:
+
+```bash
+# Override etcd.endpoints
+ETCD_ENDPOINTS=etcd-0:2379,etcd-1:2379,etcd-2:2379
+
+# Override minio.accessKeyID
+MINIO_ACCESS_KEY_ID=my-access-key
+
+# Override log.level
+LOG_LEVEL=debug
+```
+
+<Tip>
+Environment variable overrides take effect immediately without editing the YAML file, making them useful for Kubernetes secrets and container orchestration.
+</Tip>
+
+---
+
+## etcd
+
+etcd stores all Milvus metadata and is used for service discovery. Configure it under the `etcd:` key.
+
+```yaml
+etcd:
+  endpoints: localhost:2379        # Comma-separated list of etcd endpoints
+  rootPath: by-dev                 # Key prefix for all Milvus data in etcd
+  metaSubPath: meta                # Sub-prefix for metadata keys
+  kvSubPath: kv                    # Sub-prefix for KV keys
+  requestTimeout: 10000            # Operation timeout in milliseconds
+  auth:
+    enabled: false                 # Set true if etcd requires authentication
+    userName: ""
+    password: ""
+  ssl:
+    enabled: false                 # Set true to enable TLS for etcd connections
+    tlsCert: /path/to/etcd-client.pem
+    tlsKey: /path/to/etcd-client-key.pem
+    tlsCACert: /path/to/ca.pem
+    tlsMinVersion: 1.3
+```
+
+<Warning>
+`etcd.rootPath` must be unique per Milvus instance if multiple instances share the same etcd cluster. Set this before first startup — changing it afterward makes existing data inaccessible.
+</Warning>
+
+---
+
+## MinIO / S3 object storage
+
+Milvus uses MinIO-compatible object storage for all persistent vector and index data.
+
+```yaml
+minio:
+  address: localhost:9000           # Hostname and port of your storage service
+  port: 9000
+  accessKeyID: minioadmin           # Access key (env: MINIO_ACCESS_KEY_ID)
+  secretAccessKey: minioadmin       # Secret key (env: MINIO_SECRET_ACCESS_KEY)
+  bucketName: a-bucket              # Bucket Milvus will use (created if missing)
+  rootPath: files                   # Key prefix inside the bucket
+  useSSL: false                     # Set true for HTTPS connections
+  cloudProvider: aws                # "aws", "gcp", "aliyun", or "gcpnative"
+  useIAM: false                     # Use IAM role instead of keys (AWS/GCP/Aliyun)
+  region: ""                        # Storage region, e.g. us-east-1
+```
+
+<Tabs>
+  <Tab title="AWS S3">
+    ```yaml
+    minio:
+      address: s3.amazonaws.com
+      bucketName: my-milvus-bucket
+      rootPath: milvus-data
+      useSSL: true
+      cloudProvider: aws
+      useIAM: true           # Use EC2 instance role or EKS IRSA
+      region: us-east-1
+    ```
+  </Tab>
+  <Tab title="GCS">
+    ```yaml
+    minio:
+      address: storage.googleapis.com
+      bucketName: my-milvus-bucket
+      rootPath: milvus-data
+      useSSL: true
+      cloudProvider: gcpnative
+      gcpCredentialJSON: ""  # Base64-encoded service account JSON
+    ```
+  </Tab>
+  <Tab title="MinIO (self-hosted)">
+    ```yaml
+    minio:
+      address: minio.internal:9000
+      accessKeyID: minio-user
+      secretAccessKey: minio-secret
+      bucketName: milvus
+      rootPath: data
+      useSSL: false
+      cloudProvider: aws   # MinIO uses the "aws" provider (S3 API v4)
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+`minio.bucketName` and `minio.rootPath` must be unique per Milvus instance if multiple instances share the same storage service.
+</Note>
+
+---
+
+## Proxy
+
+The proxy is the user-facing component. It listens for gRPC (port 19530) and HTTP (port 9091) connections.
+
+```yaml
+proxy:
+  port: 19530          # gRPC port for SDK connections
+  http:
+    enabled: true      # Enable the RESTful HTTP API
+    port: ""           # Defaults to 9091 when blank
+  maxFieldNum: 64      # Maximum number of fields per collection
+  maxShardNum: 16      # Maximum shards per collection
+  maxDimension: 32768  # Maximum vector dimensions
+  maxTaskNum: 1024     # Task queue depth
+  accessLog:
+    enable: false      # Enable per-request access logging
+    filename: ""       # Empty = stdout; set a path to write to a file
+    localPath: /tmp/milvus_access
+```
+
+### Rate limiting
+
+Enable quota and limits to protect your cluster from traffic spikes:
+
+```yaml
+quotaAndLimits:
+  enabled: true
+  dml:
+    enabled: true
+    insertRate:
+      max: 50          # MB/s cluster-wide insert cap; -1 = unlimited
+      collection:
+        max: 10        # MB/s per-collection cap
+    deleteRate:
+      max: 10          # MB/s delete cap
+  dql:
+    enabled: true
+    searchRate:
+      max: 1000        # vectors/second search cap
+      collection:
+        max: 200       # vectors/second per-collection
+    queryRate:
+      max: 100         # queries/second
+```
+
+---
+
+## Coordinators
+
+<AccordionGroup>
+  <Accordion title="rootCoord">
+    The root coordinator handles DDL operations (create/drop collections) and global time ticks.
+
+    ```yaml
+    rootCoord:
+      maxPartitionNum: 1024       # Maximum partitions per collection
+      maxDatabaseNum: 64          # Maximum databases
+      dmlChannelNum: 16           # Number of DML channels created at startup
+      port: 22125
+    ```
+  </Accordion>
+
+  <Accordion title="dataCoord">
+    The data coordinator manages segment lifecycle and compaction.
+
+    ```yaml
+    dataCoord:
+      segment:
+        maxSize: 1024             # Maximum segment size in MB
+        sealProportion: 0.12      # Seal threshold as fraction of maxSize
+      enableCompaction: true
+      compaction:
+        enableAutoCompaction: true
+      enableGarbageCollection: true
+      gc:
+        interval: 3600            # GC interval in seconds
+        dropTolerance: 10800      # Retain deleted segment data for this many seconds
+      port: 13333
+    ```
+  </Accordion>
+
+  <Accordion title="queryCoord">
+    The query coordinator manages segment loading and balancing across query nodes.
+
+    ```yaml
+    queryCoord:
+      autoBalance: true           # Automatically rebalance memory across query nodes
+      balancer: ScoreBasedBalancer
+      overloadedMemoryThresholdPercentage: 90   # Trigger rebalance above this %
+      loadTimeoutSeconds: 600
+      port: 19531
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Logging
+
+```yaml
+log:
+  level: info        # trace | debug | info | warn | error | fatal
+  format: text       # text | json
+  stdout: true       # Also print to stdout when writing to a file
+  file:
+    rootPath: ""     # Write logs to this directory; empty = stdout only
+    maxSize: 300     # Max log file size in MB before rotation
+    maxAge: 10       # Retain rotated log files for this many days
+    maxBackups: 20   # Maximum number of rotated backup files
+```
+
+<Note>
+Use `debug` level for development and troubleshooting. Use `info` or `warn` in production to reduce log volume.
+</Note>
+
+---
+
+## Common settings
+
+```yaml
+common:
+  defaultPartitionName: _default    # Name of the partition auto-created per collection
+  defaultIndexName: _default_idx
+
+  security:
+    authorizationEnabled: false     # Set true to require user authentication
+    tlsMode: 0                      # 0 = no TLS, 1 = one-way, 2 = mutual TLS
+    defaultRootPassword: Milvus     # Password for the root superuser
+
+  session:
+    ttl: 15            # etcd session lease TTL in seconds
+    retryTimes: 30     # Retries for etcd operations
+```
+
+---
+
+## Hot-reload vs restart-required parameters
+
+<Tabs>
+  <Tab title="Hot-reloadable (no restart needed)">
+    The following parameters take effect within seconds after you update `milvus.yaml` or the environment variable:
+
+    - `log.level`
+    - `quotaAndLimits.*` — all rate limits and quota values
+    - `proxy.maxTaskNum`
+    - `dataCoord.compaction.enableAutoCompaction`
+    - `queryCoord.autoBalance`
+  </Tab>
+  <Tab title="Requires restart">
+    These parameters are read only at startup:
+
+    - `etcd.endpoints`, `etcd.rootPath`
+    - `minio.address`, `minio.bucketName`, `minio.rootPath`
+    - `proxy.port`
+    - `common.security.tlsMode`
+    - `tls.*`, `internaltls.*`
+    - All `*.port` values for coordinators and nodes
+  </Tab>
+</Tabs>

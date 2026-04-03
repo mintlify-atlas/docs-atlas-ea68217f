@@ -1,97 +1,108 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Milvus — Vector Database for AI"
+description: "A high-performance, cloud-native vector database built for scalable similarity search over billions of vectors. Power your AI applications with efficient storage and retrieval of embeddings."
 ---
 
-## Setting up
+Milvus is an open-source vector database purpose-built for AI-scale similarity search. Whether you're building a RAG pipeline, semantic search engine, recommendation system, or multimodal application, Milvus handles the vector storage and retrieval so you can focus on your application logic.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get a vector database running and perform your first search in minutes using Milvus Lite.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Install Milvus" icon="server" href="/install-standalone">
+    Deploy Milvus Standalone with Docker or as a distributed cluster on Kubernetes.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Core Concepts" icon="book" href="/concepts/data-model">
+    Understand collections, partitions, segments, indexes, and how Milvus organizes vector data.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/create-collection">
+    Explore the full gRPC/HTTP API surface for collections, data ingestion, and search.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why Milvus?
 
-Everything you need to create world-class documentation.
+Milvus separates compute from storage and scales each tier independently. It supports all major vector index algorithms — HNSW, IVF, DiskANN, SCANN — along with GPU acceleration via NVIDIA CAGRA.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="Hybrid Search" icon="magnifying-glass" href="/guides/hybrid-search">
+    Combine dense vector, sparse vector, and full-text BM25 search in a single query with RRF reranking.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Billion-scale" icon="chart-line" href="/concepts/architecture">
+    Distributed architecture handles tens of thousands of QPS across billions of vectors.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Cloud-native" icon="cloud" href="/install-cluster">
+    Kubernetes-native deployment with stateless microservices and fast failure recovery.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Multiple Index Types" icon="list-tree" href="/concepts/index-types">
+    HNSW, IVF_FLAT, IVF_PQ, DiskANN, SCANN, CAGRA — choose the right index for your workload.
   </Card>
-</Columns>
+  <Card title="Full-text Search" icon="text" href="/guides/full-text-search">
+    Native BM25 full-text search alongside vector similarity search in the same collection.
+  </Card>
+  <Card title="Enterprise Security" icon="shield" href="/operations/access-control">
+    Role-based access control (RBAC), TLS encryption, and per-collection authentication.
+  </Card>
+</CardGroup>
 
-## Need inspiration?
+## Get started in three steps
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Steps>
+  <Step title="Install pymilvus">
+    Install the Python SDK to connect to Milvus Lite (embedded), Standalone, or Zilliz Cloud.
+    ```bash
+    pip install -U pymilvus
+    ```
+  </Step>
+  <Step title="Create a collection and insert vectors">
+    Define a schema with a vector field and ingest your embeddings.
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient("milvus_demo.db")  # Milvus Lite local file
+
+    client.create_collection(
+        collection_name="my_collection",
+        dimension=768,
+    )
+
+    client.insert(
+        collection_name="my_collection",
+        data=[{"id": 1, "vector": [0.1] * 768, "text": "Hello Milvus"}],
+    )
+    ```
+  </Step>
+  <Step title="Search for similar vectors">
+    Run an approximate nearest neighbor (ANN) search and retrieve results with metadata.
+    ```python
+    results = client.search(
+        collection_name="my_collection",
+        data=[[0.1] * 768],  # query vector
+        limit=5,
+        output_fields=["text"],
+    )
+    print(results)
+    ```
+  </Step>
+</Steps>
+
+## Explore further
+
+<CardGroup cols={2}>
+  <Card title="Working with Collections" icon="database" href="/guides/collections">
+    Create, load, release, and manage collection schemas with scalar and vector fields.
+  </Card>
+  <Card title="Vector Search" icon="search" href="/guides/vector-search">
+    Configure ANN search parameters, metric types, and result filtering.
+  </Card>
+  <Card title="Metadata Filtering" icon="filter" href="/guides/metadata-filtering">
+    Filter search results with boolean expressions on scalar fields.
+  </Card>
+  <Card title="Integrations" icon="puzzle-piece" href="/integrations/overview">
+    Connect Milvus with LangChain, LlamaIndex, HuggingFace, and more AI frameworks.
+  </Card>
+</CardGroup>
+
+<Tip>
+  New to vector databases? Start with the [Quickstart](/quickstart) to run Milvus Lite locally with no infrastructure required.
+</Tip>

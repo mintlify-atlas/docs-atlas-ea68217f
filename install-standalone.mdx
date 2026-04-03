@@ -1,0 +1,256 @@
+---
+title: "Install Milvus Standalone"
+description: "Deploy a single-node Milvus server with Docker Compose. Suitable for development servers and smaller production workloads."
+---
+
+Milvus Standalone runs as a set of Docker containers managed by Docker Compose. A single Milvus process handles all operations and is backed by **etcd** (metadata storage) and **MinIO** (object storage). This mode requires no Kubernetes and is the simplest path to a persistent, always-on Milvus server.
+
+<Note>
+  If you only need a local database for notebooks or prototyping, use [Milvus Lite](/quickstart) instead — it requires no Docker. For large-scale production deployments, see [Milvus Cluster](/install-cluster).
+</Note>
+
+## Prerequisites
+
+- **Docker Engine** 20.10 or later — [install guide](https://docs.docker.com/get-docker/)
+- **Docker Compose** v2 plugin (bundled with Docker Desktop) or the `docker-compose` v1 standalone CLI — [install guide](https://docs.docker.com/compose/install/)
+- At least **4 GB of free RAM** available to Docker
+- Ports **19530** (gRPC) and **9091** (HTTP/healthz) available on the host
+
+Verify your Docker installation:
+
+```bash
+docker --version
+docker compose version
+```
+
+## Steps
+
+<Steps>
+  <Step title="Download the Docker Compose file">
+    Download the official Milvus Standalone Docker Compose configuration:
+
+    ```bash
+    curl -LO https://github.com/milvus-io/milvus/releases/latest/download/milvus-standalone-docker-compose.yml
+    ```
+
+    Alternatively, create `docker-compose.yml` with the following content (pinned to a specific Milvus release):
+
+    ```yaml docker-compose.yml
+    version: '3.5'
+
+    services:
+      etcd:
+        container_name: milvus-etcd
+        image: quay.io/coreos/etcd:v3.5.25
+        environment:
+          - ETCD_AUTO_COMPACTION_MODE=revision
+          - ETCD_AUTO_COMPACTION_RETENTION=1000
+          - ETCD_QUOTA_BACKEND_BYTES=4294967296
+          - ETCD_SNAPSHOT_COUNT=50000
+        volumes:
+          - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/etcd:/etcd
+        command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+        healthcheck:
+          test: ["CMD", "etcdctl", "endpoint", "health"]
+          interval: 30s
+          timeout: 20s
+          retries: 3
+
+      minio:
+        container_name: milvus-minio
+        image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+        environment:
+          MINIO_ACCESS_KEY: minioadmin
+          MINIO_SECRET_KEY: minioadmin
+        ports:
+          - "9001:9001"
+          - "9000:9000"
+        volumes:
+          - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
+        command: minio server /minio_data --console-address ":9001"
+        healthcheck:
+          test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+          interval: 30s
+          timeout: 20s
+          retries: 3
+
+      standalone:
+        container_name: milvus-standalone
+        image: milvusdb/milvus:v2.6.13
+        command: ["milvus", "run", "standalone"]
+        security_opt:
+          - seccomp:unconfined
+        environment:
+          MINIO_REGION: us-east-1
+          ETCD_ENDPOINTS: etcd:2379
+          MINIO_ADDRESS: minio:9000
+        volumes:
+          - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
+        healthcheck:
+          test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+          interval: 30s
+          start_period: 90s
+          timeout: 20s
+          retries: 3
+        ports:
+          - "19530:19530"
+          - "9091:9091"
+        depends_on:
+          - "etcd"
+          - "minio"
+
+    networks:
+      default:
+        name: milvus
+    ```
+  </Step>
+
+  <Step title="Start Milvus">
+    Start all three services in detached mode from the directory containing `docker-compose.yml`:
+
+    ```bash
+    docker compose up -d
+    ```
+
+    Docker pulls the images on first run (this may take a few minutes). On subsequent starts it reuses cached images.
+
+    Expected output:
+
+    ```
+    [+] Running 3/3
+     ✔ Container milvus-etcd        Started
+     ✔ Container milvus-minio       Started
+     ✔ Container milvus-standalone  Started
+    ```
+  </Step>
+
+  <Step title="Verify the deployment">
+    Check that all containers are running and healthy:
+
+    ```bash
+    docker compose ps
+    ```
+
+    All three containers should show `healthy` in the `STATUS` column. The Milvus container has a 90-second startup grace period, so wait up to two minutes before expecting it to become healthy.
+
+    Confirm Milvus is ready by querying the health endpoint:
+
+    ```bash
+    curl http://localhost:9091/healthz
+    ```
+
+    A healthy response returns:
+
+    ```
+    OK
+    ```
+  </Step>
+
+  <Step title="Connect with pymilvus">
+    Install the Python SDK and verify the connection:
+
+    ```bash
+    pip install -U pymilvus
+    ```
+
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(
+        uri="http://localhost:19530",
+        token="root:Milvus",   # default credentials
+    )
+
+    print(client.list_collections())  # should print []
+    ```
+
+    <Tip>
+      Change the default password immediately in any environment exposed to a network. See the [authentication guide](/operations/authentication) for instructions.
+    </Tip>
+  </Step>
+</Steps>
+
+## Port reference
+
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 19530 | gRPC | Primary SDK and API connections |
+| 9091 | HTTP | Health check endpoint (`/healthz`) and metrics |
+| 9000 | HTTP | MinIO S3 API (internal) |
+| 9001 | HTTP | MinIO web console |
+| 2379 | gRPC | etcd client API (internal) |
+
+The MinIO and etcd ports are not exposed to the host by default in production setups — they are on the internal `milvus` Docker network.
+
+## Managing the deployment
+
+### Stop Milvus
+
+Stop all containers while preserving data volumes:
+
+```bash
+docker compose down
+```
+
+### Start again
+
+```bash
+docker compose up -d
+```
+
+Data is persisted in the `./volumes/` directory (or the path set by `DOCKER_VOLUME_DIRECTORY`). Restarting does not lose any collections or data.
+
+### Remove Milvus and all data
+
+```bash
+docker compose down -v
+```
+
+<Warning>
+  The `-v` flag removes Docker volumes and permanently deletes all stored data. Use this only when you want a clean reset.
+</Warning>
+
+### View logs
+
+```bash
+# Tail logs from the Milvus container
+docker logs milvus-standalone -f
+
+# View etcd or MinIO logs
+docker logs milvus-etcd -f
+docker logs milvus-minio -f
+```
+
+### Upgrade Milvus
+
+Update the image tag in `docker-compose.yml` to the desired version, then:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+## Storing data on a custom path
+
+By default, volumes are created in a `./volumes/` subdirectory relative to `docker-compose.yml`. Set `DOCKER_VOLUME_DIRECTORY` to use a different path:
+
+```bash
+DOCKER_VOLUME_DIRECTORY=/data/milvus docker compose up -d
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Authentication" icon="lock" href="/operations/authentication">
+    Enable user authentication and change the default root password.
+  </Card>
+  <Card title="Access control" icon="shield" href="/operations/access-control">
+    Configure RBAC roles and grant privileges to users.
+  </Card>
+  <Card title="Configuration" icon="gear" href="/operations/configuration">
+    Tune memory limits, storage paths, log levels, and more.
+  </Card>
+  <Card title="Milvus Cluster" icon="cloud" href="/install-cluster">
+    Scale out to a distributed deployment on Kubernetes.
+  </Card>
+</CardGroup>

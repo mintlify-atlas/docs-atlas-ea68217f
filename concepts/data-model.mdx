@@ -1,0 +1,175 @@
+---
+title: "Data Model"
+description: "How Milvus organizes data: databases, collections, partitions, segments, and the field types that make up a schema."
+---
+
+Milvus uses a hierarchical data model. Before inserting vectors or running searches, you need to understand how data is structured and what schema options are available.
+
+## Hierarchy
+
+Data in Milvus is organized in five levels, from coarsest to finest:
+
+```
+Database
+└── Collection  (like a table)
+    └── Partition  (logical subdivision)
+        └── Segment  (unit of storage and indexing)
+            └── Row  (a single entity)
+```
+
+| Level | Description |
+|---|---|
+| **Database** | Top-level namespace. One Milvus deployment can host multiple databases. |
+| **Collection** | The primary organizational unit. Equivalent to a table in a relational database. Defined by a schema with required fields. |
+| **Partition** | A named logical subdivision of a collection. Queries can target one or more partitions to reduce scan scope. |
+| **Segment** | The internal unit of data organization and data-to-node mapping. Segments are also the unit of replication. The physical layout inside a segment is column-based to minimize memory footprint and enable SIMD acceleration. |
+| **Row** | A single entity (record). Every row must include a value for the primary key field and all other required fields. |
+
+<Note>
+You do not manage segments directly. Milvus handles segment creation, merging, and redistribution automatically.
+</Note>
+
+## Collections
+
+A collection is defined by a schema. Every schema must specify:
+
+- Exactly one **primary key field** — either `INT64` or `VARCHAR`
+- At least one **vector field** — the field that holds your embeddings
+- Any number of **scalar fields** — for metadata storage and filtering
+
+You can optionally enable `AutoID`, which tells Milvus to generate primary key values automatically on insert.
+
+### Schema example
+
+```python
+from pymilvus import MilvusClient, DataType
+
+client = MilvusClient("milvus_demo.db")
+
+schema = client.create_schema(auto_id=False, enable_dynamic_field=True)
+
+# Primary key
+schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True)
+
+# Vector field (dense, 768-dimensional)
+schema.add_field(field_name="embedding", datatype=DataType.FLOAT_VECTOR, dim=768)
+
+# Scalar fields
+schema.add_field(field_name="title",     datatype=DataType.VARCHAR, max_length=512)
+schema.add_field(field_name="score",     datatype=DataType.FLOAT)
+schema.add_field(field_name="published", datatype=DataType.BOOL)
+schema.add_field(field_name="tags",      datatype=DataType.ARRAY,
+                 element_type=DataType.VARCHAR, max_capacity=10, max_length=64)
+schema.add_field(field_name="metadata",  datatype=DataType.JSON)
+
+client.create_collection(collection_name="articles", schema=schema)
+```
+
+## Field types
+
+<Tabs>
+  <Tab title="Scalar types">
+
+| Type | Description |
+|---|---|
+| `INT8` | 8-bit signed integer |
+| `INT16` | 16-bit signed integer |
+| `INT32` | 32-bit signed integer |
+| `INT64` | 64-bit signed integer. Supported as primary key. |
+| `FLOAT` | 32-bit floating point |
+| `DOUBLE` | 64-bit floating point |
+| `BOOL` | Boolean (`true` / `false`) |
+| `VARCHAR` | Variable-length string. Requires `max_length` (1–65535). Supported as primary key. |
+| `JSON` | Arbitrary JSON object. Keys are queryable with dot-notation expressions. |
+| `ARRAY` | Fixed-element-type array. Requires `element_type` and `max_capacity`. |
+
+  </Tab>
+  <Tab title="Vector types">
+
+| Type | Description |
+|---|---|
+| `FLOAT_VECTOR` | Dense vector of 32-bit floats. Requires `dim`. The most common type for neural embeddings. |
+| `BINARY_VECTOR` | Dense vector stored as packed bits. Requires `dim` (must be a multiple of 8). Used for hash-based or binary descriptors. |
+| `FLOAT16_VECTOR` | Dense vector of 16-bit floats. Requires `dim`. Reduces memory vs. `FLOAT_VECTOR` at minimal accuracy cost. |
+| `BFLOAT16_VECTOR` | Dense vector of bfloat16 values. Requires `dim`. Common in ML workloads trained with bf16 precision. |
+| `SPARSE_FLOAT_VECTOR` | Sparse vector represented as `{dimension_index: value}` pairs. Used for keyword/BM25-style representations. Does not require a fixed `dim`. |
+
+  </Tab>
+</Tabs>
+
+## Primary key
+
+Every collection must have exactly one primary key field. The primary key uniquely identifies each row and is used internally for deduplication and deletion.
+
+<AccordionGroup>
+  <Accordion title="Auto-generated primary key">
+    Set `auto_id=True` on the schema (or `AutoID=True` on the primary key field). Milvus assigns a unique `INT64` value to each inserted row. You do not provide ID values on insert.
+
+    ```python
+    schema = client.create_schema(auto_id=True)
+    schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True)
+    ```
+  </Accordion>
+  <Accordion title="User-defined primary key">
+    Set `auto_id=False`. You must supply an ID value for every row on insert. Supported types are `INT64` and `VARCHAR`.
+
+    ```python
+    schema = client.create_schema(auto_id=False)
+    schema.add_field(field_name="doc_id", datatype=DataType.VARCHAR,
+                     is_primary=True, max_length=128)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+Primary key values are immutable. You cannot update a row's primary key after insertion. To change it, delete the row and re-insert it with the new key.
+</Warning>
+
+## Partitions
+
+A partition is a named logical subdivision of a collection. Partitions let you scope inserts and queries to a subset of the data, which reduces scan cost when you know which partition holds the relevant rows.
+
+```python
+client.create_partition(collection_name="articles", partition_name="2024")
+client.create_partition(collection_name="articles", partition_name="2025")
+
+# Insert into a specific partition
+client.insert(collection_name="articles", partition_name="2025", data=[...])
+
+# Search within a partition
+results = client.search(
+    collection_name="articles",
+    partition_names=["2025"],
+    data=[query_vector],
+    limit=10,
+)
+```
+
+<Tip>
+Partitions are most useful when you have a clear, stable way to segment data — for example, by time range, tenant ID, or data source. Avoid creating hundreds of tiny partitions; each partition has overhead.
+</Tip>
+
+## Segments
+
+Segments are the finest unit of data organization in Milvus. They are managed entirely by the system.
+
+- Data and indexes are physically stored inside segments.
+- Each segment belongs to one partition and maps to one or more query nodes.
+- Segments are also the unit of replica assignment: when a query node fails, its segments are redistributed to other nodes.
+- The physical layout within a segment is **column-based**, so queries that touch only a few fields do not read unrelated data.
+
+There are two segment states:
+
+| State | Description |
+|---|---|
+| **Growing** | Currently accepting new inserts. Held in memory on the data node. |
+| **Sealed** | No longer accepting inserts. Flushed to object storage and available for indexing. |
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="server" href="/concepts/architecture">
+    See how coordinators and nodes manage segments across the cluster.
+  </Card>
+  <Card title="Index types" icon="list-tree" href="/concepts/index-types">
+    Learn how indexes are built on top of sealed segments.
+  </Card>
+</CardGroup>

@@ -1,80 +1,221 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Run your first vector search in minutes using Milvus Lite — no Docker or Kubernetes required."
 ---
 
-## Get started in three steps
+Milvus Lite is a lightweight version of Milvus that runs entirely in Python and stores data in a local file. It is the fastest way to start experimenting with vector search without any infrastructure setup.
 
-Get your documentation site running locally and make your first customization.
+<Note>
+  Milvus Lite is ideal for local development, notebooks, and prototyping. For persistent single-node deployments use [Milvus Standalone](/install-standalone), and for production scale use [Milvus Cluster](/install-cluster). All three share the same `MilvusClient` API, so your code transfers with no changes.
+</Note>
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- Python 3.8 – 3.11
+- `pip` available on your path
 
-### Step 2: Deploy your changes
+## Steps
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Steps>
+  <Step title="Install pymilvus">
+    Install the Milvus Python SDK. The `-U` flag ensures you get the latest version.
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    ```bash
+    pip install -U pymilvus
+    ```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    To also enable Milvus Lite (the embedded local database), install the optional extra:
 
-### Step 3: Go live
+    ```bash
+    pip install -U "pymilvus[milvus-lite]"
+    ```
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Create a local database">
+    Pass a local file path to `MilvusClient`. Milvus Lite creates the file on first use and persists all data there across sessions.
+
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient("milvus_demo.db")
+    ```
+
+    The file `milvus_demo.db` is created in your current working directory. Delete it to reset the database.
+  </Step>
+
+  <Step title="Create a collection">
+    A collection is analogous to a table. Each row must include an integer primary key (`id`) and a float vector field. The `dimension` parameter must match the output size of your embedding model.
+
+    ```python
+    client.create_collection(
+        collection_name="demo_collection",
+        dimension=768,  # match your embedding model output size
+    )
+    ```
+
+    Milvus automatically creates a primary key field (`id`) and uses COSINE as the default metric type. To specify the metric type explicitly:
+
+    ```python
+    client.create_collection(
+        collection_name="demo_collection",
+        dimension=768,
+        metric_type="IP",  # Inner Product; use "COSINE" or "L2" as needed
+    )
+    ```
+  </Step>
+
+  <Step title="Insert data">
+    Each record is a dictionary. The `vector` field holds the embedding; you can attach any number of additional scalar fields.
+
+    ```python
+    import random
+
+    # Prepare sample data: 10 records with 768-dimensional random vectors
+    data = [
+        {
+            "id": i,
+            "vector": [random.uniform(-1, 1) for _ in range(768)],
+            "text": f"Sample document {i}",
+            "subject": "science" if i % 2 == 0 else "history",
+        }
+        for i in range(10)
+    ]
+
+    res = client.insert(collection_name="demo_collection", data=data)
+    print(res)
+    # Output: {'insert_count': 10, 'ids': [0, 1, 2, ..., 9]}
+    ```
+  </Step>
+
+  <Step title="Run a vector search">
+    Pass one or more query vectors to `search`. The `limit` parameter controls how many results to return (top-K).
+
+    ```python
+    query_vector = [random.uniform(-1, 1) for _ in range(768)]
+
+    results = client.search(
+        collection_name="demo_collection",
+        data=[query_vector],       # list of query vectors; supports batches
+        limit=3,                   # return top-3 results
+        output_fields=["text", "subject"],  # scalar fields to include in response
+    )
+
+    for hits in results:
+        for hit in hits:
+            print(f"id={hit['id']}  distance={hit['distance']:.4f}  text={hit['entity']['text']}")
+    ```
+
+    Example output:
+
+    ```
+    id=4  distance=0.8731  text=Sample document 4
+    id=7  distance=0.8612  text=Sample document 7
+    id=1  distance=0.8489  text=Sample document 1
+    ```
+  </Step>
+
+  <Step title="Filter by metadata (optional)">
+    Use a boolean filter expression to restrict the search to a subset of your data. Scalar fields are indexed automatically in Milvus Lite.
+
+    ```python
+    results = client.search(
+        collection_name="demo_collection",
+        data=[query_vector],
+        limit=3,
+        filter='subject == "science"',        # only search science documents
+        output_fields=["text", "subject"],
+    )
+    ```
+
+    You can also query without a vector using `client.query`:
+
+    ```python
+    records = client.query(
+        collection_name="demo_collection",
+        filter='subject == "history"',
+        output_fields=["id", "text"],
+    )
+    ```
+  </Step>
+</Steps>
+
+## Connect to a deployed Milvus server
+
+When you are ready to move beyond local development, point `MilvusClient` at a running Milvus Standalone or Cluster instance — or a Zilliz Cloud endpoint:
+
+<Tabs>
+  <Tab title="Milvus Standalone / Cluster">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(
+        uri="http://localhost:19530",   # replace with your server address
+        token="root:Milvus",           # default credentials; change in production
+    )
+    ```
+  </Tab>
+  <Tab title="Zilliz Cloud">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(
+        uri="https://<cluster-endpoint>.zillizcloud.com",
+        token="<your-api-key>",
+    )
+    ```
+
+    Get your endpoint and API key from the [Zilliz Cloud console](https://cloud.zilliz.com).
+  </Tab>
+</Tabs>
+
+All `MilvusClient` methods — `create_collection`, `insert`, `search`, `query` — work identically across Milvus Lite, Standalone, and Zilliz Cloud.
+
+## Using real embeddings
+
+The examples above use random vectors. In practice you will generate embeddings from a model. Here is a minimal example using `pymilvus[model]`:
+
+```bash
+pip install "pymilvus[model]"
+```
+
+```python
+from pymilvus import MilvusClient
+from pymilvus.model.hybrid import BGEM3EmbeddingFunction
+
+ef = BGEM3EmbeddingFunction(use_fp16=False, device="cpu")
+
+docs = [
+    "Artificial intelligence is transforming industries.",
+    "Vector databases power modern semantic search.",
+    "Milvus supports hybrid dense and sparse search.",
+]
+
+embeddings = ef.encode_documents(docs)["dense"]  # list of 1024-dim vectors
+
+client = MilvusClient("milvus_demo.db")
+client.create_collection("docs", dimension=1024)
+client.insert("docs", [{"id": i, "vector": v, "text": t} for i, (v, t) in enumerate(zip(embeddings, docs))])
+
+query_vec = ef.encode_queries(["What is semantic search?"])["dense"]
+results = client.search("docs", data=query_vec, limit=2, output_fields=["text"])
+for hits in results:
+    for hit in hits:
+        print(hit["entity"]["text"], "→ score:", round(hit["distance"], 4))
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Install Milvus Standalone" icon="server" href="/install-standalone">
+    Deploy a persistent single-node Milvus server with Docker Compose.
+  </Card>
+  <Card title="Install Milvus Cluster" icon="cloud" href="/install-cluster">
+    Scale out to a distributed Kubernetes cluster for production workloads.
+  </Card>
+  <Card title="Working with collections" icon="database" href="/guides/collections">
+    Define custom schemas with multiple vector and scalar fields.
+  </Card>
+  <Card title="Hybrid search" icon="magnifying-glass" href="/guides/hybrid-search">
+    Combine dense, sparse, and full-text search in a single query.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

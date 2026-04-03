@@ -1,0 +1,187 @@
+---
+title: "Create Collection"
+description: "Creates a new collection with the specified schema in Milvus."
+---
+
+Creates a new collection in Milvus. You can create a collection using a shorthand `dimension` parameter for simple float vector use cases, or supply a full `CollectionSchema` for complete control over field definitions.
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  Name of the collection to create. Must be unique within the database.
+</ParamField>
+
+<ParamField path="dimension" type="int">
+  Shorthand for creating a simple float vector collection. When provided, Milvus automatically creates a primary key field (`id`) and a float vector field (`vector`) with the given dimensionality. Cannot be used together with `schema`.
+</ParamField>
+
+<ParamField path="schema" type="CollectionSchema">
+  Full schema definition for custom collections. Use this when you need multiple fields, custom field names, or non-vector field types. Cannot be used together with `dimension`.
+
+  <Expandable title="CollectionSchema properties">
+    <ParamField path="name" type="string" required>
+      Name of the collection. Should match `collection_name`.
+    </ParamField>
+
+    <ParamField path="description" type="string">
+      Human-readable description of the collection.
+    </ParamField>
+
+    <ParamField path="auto_id" type="boolean" default="false">
+      When `true`, Milvus generates a unique ID for each entity automatically. When `false`, you must supply an ID for each entity on insert.
+    </ParamField>
+
+    <ParamField path="fields" type="FieldSchema[]" required>
+      List of field definitions. At least one primary key field and one vector field are required.
+
+      <Expandable title="FieldSchema properties">
+        <ParamField path="name" type="string" required>
+          Name of the field.
+        </ParamField>
+
+        <ParamField path="dtype" type="DataType" required>
+          Data type of the field. See [DataType enum](#datatype-enum) below.
+        </ParamField>
+
+        <ParamField path="is_primary" type="boolean" default="false">
+          Marks the field as the primary key. Exactly one field in the schema must have `is_primary=True`. Primary key fields must be `INT64` or `VARCHAR`.
+        </ParamField>
+
+        <ParamField path="is_partition_key" type="boolean" default="false">
+          Marks the field as the partition key. Enables partition-key-based data isolation.
+        </ParamField>
+
+        <ParamField path="dim" type="int">
+          Dimensionality of vector fields. Required when `dtype` is `FLOAT_VECTOR`, `BINARY_VECTOR`, `FLOAT16_VECTOR`, or `BFLOAT16_VECTOR`. Not applicable for `SPARSE_FLOAT_VECTOR` fields, which do not have a fixed dimensionality.
+        </ParamField>
+
+        <ParamField path="max_length" type="int">
+          Maximum byte length for `VARCHAR` fields.
+        </ParamField>
+
+        <ParamField path="description" type="string">
+          Human-readable description of the field.
+        </ParamField>
+      </Expandable>
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="index_params" type="list">
+  Index configuration to automatically create an index after the collection is created. Each entry maps a field name to its index parameters (e.g., `index_type`, `metric_type`, `params`). If omitted, you must call `create_index` separately before loading the collection.
+</ParamField>
+
+<ParamField path="metric_type" type="string" default="COSINE">
+  Distance metric used for vector similarity search. Applicable when using the `dimension` shorthand or when `index_params` does not specify a metric. Supported values:
+
+  - `L2` — Euclidean distance
+  - `IP` — Inner product
+  - `COSINE` — Cosine similarity
+</ParamField>
+
+<ParamField path="consistency_level" type="string" default="Bounded">
+  Read consistency guarantee for the collection. Supported values:
+
+  - `Strong` — All reads reflect the latest writes.
+  - `Bounded` — Reads may lag behind writes by a bounded amount of time.
+  - `Session` — A client always reads its own writes.
+  - `Eventually` — No ordering guarantees; highest throughput.
+</ParamField>
+
+<ParamField path="num_shards" type="int" default="1">
+  Number of shards for the collection. More shards increase write throughput but also resource usage.
+</ParamField>
+
+<ParamField path="enable_dynamic_field" type="boolean" default="false">
+  When `true`, entities may contain fields not defined in the schema. Extra fields are stored in a reserved JSON column (`$meta`) and can be used in scalar filters.
+</ParamField>
+
+## DataType enum
+
+| Value | Description |
+|---|---|
+| `INT8` | 8-bit signed integer |
+| `INT16` | 16-bit signed integer |
+| `INT32` | 32-bit signed integer |
+| `INT64` | 64-bit signed integer |
+| `FLOAT` | 32-bit floating-point number |
+| `DOUBLE` | 64-bit floating-point number |
+| `BOOL` | Boolean |
+| `VARCHAR` | Variable-length string (requires `max_length`) |
+| `JSON` | JSON document |
+| `ARRAY` | Array of a scalar type |
+| `FLOAT_VECTOR` | Dense float vector (requires `dim`) |
+| `BINARY_VECTOR` | Binary vector (requires `dim`) |
+| `SPARSE_FLOAT_VECTOR` | Sparse float vector |
+
+## Examples
+
+<CodeGroup>
+
+```python Simple collection (dimension shorthand)
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+# Create a 128-dimensional float vector collection with default settings.
+# Milvus automatically creates 'id' (INT64 primary key) and
+# 'vector' (FLOAT_VECTOR) fields.
+client.create_collection(
+    collection_name="my_collection",
+    dimension=128,
+    metric_type="COSINE",
+)
+```
+
+```python Full schema collection
+from pymilvus import MilvusClient, DataType
+
+client = MilvusClient(uri="http://localhost:19530")
+
+schema = client.create_schema(
+    auto_id=False,
+    enable_dynamic_field=True,
+)
+
+schema.add_field(
+    field_name="article_id",
+    datatype=DataType.INT64,
+    is_primary=True,
+)
+schema.add_field(
+    field_name="title",
+    datatype=DataType.VARCHAR,
+    max_length=512,
+)
+schema.add_field(
+    field_name="embedding",
+    datatype=DataType.FLOAT_VECTOR,
+    dim=768,
+)
+
+index_params = client.prepare_index_params()
+index_params.add_index(
+    field_name="embedding",
+    index_type="HNSW",
+    metric_type="COSINE",
+    params={"M": 16, "efConstruction": 40},
+)
+
+client.create_collection(
+    collection_name="articles",
+    schema=schema,
+    index_params=index_params,
+    consistency_level="Bounded",
+    num_shards=2,
+)
+```
+
+</CodeGroup>
+
+<Note>
+  A newly created collection is not loaded into memory. Call `load_collection` before running searches or queries.
+</Note>
+
+<Tip>
+  Use the `dimension` shorthand for prototyping. Switch to a full schema when you need multiple vector fields, VARCHAR primary keys, or partition keys.
+</Tip>

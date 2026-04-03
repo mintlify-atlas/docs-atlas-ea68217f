@@ -1,0 +1,90 @@
+---
+title: "Flush"
+description: "Seal open segments and persist buffered data to object storage."
+---
+
+The `flush` method forces Milvus to seal all open segments for the specified collection and persist buffered insert and delete data to object storage (e.g., MinIO or S3). The call blocks until the flush is complete.
+
+Under normal operation, Milvus flushes data automatically when a segment reaches its configured size threshold or when a time-based trigger fires. Manual flush is useful when you need a durability guarantee before a planned disconnect or before performing a critical read after bulk ingestion.
+
+<Note>
+  Calling `flush` too frequently can increase write amplification and degrade throughput. Use it only when guaranteed durability is required, such as before shutting down an ingest pipeline.
+</Note>
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  The name of the collection to flush.
+</ParamField>
+
+## Response
+
+The method returns when the flush operation is complete and the data has been successfully persisted to object storage. No additional data is returned.
+
+## Checking flush state
+
+Use `get_flush_state` to check whether a set of segments has been flushed, without blocking.
+
+```python
+segment_ids = [440789798540133377, 440789798540133378]
+state = client.get_flush_state(
+    collection_name="my_collection",
+    segment_ids=segment_ids,
+)
+print(state)
+# {"flushed": True}
+```
+
+<ResponseField name="flushed" type="boolean">
+  `True` if all specified segments have been persisted to object storage; `False` if any segment is still buffered.
+</ResponseField>
+
+## Example
+
+<CodeGroup>
+
+```python Flush a collection
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+# Ingest a batch of data
+data = [
+    {"id": i, "vector": [float(i) / 1000] * 128}
+    for i in range(10_000)
+]
+client.insert(collection_name="my_collection", data=data)
+
+# Flush to guarantee data is persisted before disconnecting
+client.flush(collection_name="my_collection")
+print("Flush complete — data is safely persisted.")
+```
+
+```python Flush and verify state
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+# Insert some data
+client.insert(
+    collection_name="my_collection",
+    data=[{"id": 999, "vector": [0.1] * 128}],
+)
+
+# Force flush
+client.flush(collection_name="my_collection")
+
+# Verify using get_flush_state (pass segment IDs obtained from insert or describe_segment)
+# For a quick sanity check you can also query the collection row count:
+stats = client.get_collection_stats(collection_name="my_collection")
+print(stats)
+```
+
+</CodeGroup>
+
+## Notes
+
+- **Auto-flush**: Data is flushed automatically when a segment reaches the configured size (`dataCoord.segment.maxSize`, default 512 MB) or after a timeout (`dataCoord.segment.sealProportion`). In most production workflows, manual flush is not required.
+- **Blocking call**: `flush` waits for the server to confirm that all in-memory data has been written to object storage. For large collections with many buffered segments, this can take several seconds.
+- **Sealed vs. flushed segments**: Sealing closes a segment to further writes. Flushing persists a sealed segment to durable storage. Both happen automatically, but `flush` triggers both immediately.
+- **Index building**: Flushing does not trigger index building. Index construction is a separate background process managed by the index coordinator.

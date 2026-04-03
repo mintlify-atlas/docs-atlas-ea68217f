@@ -1,0 +1,114 @@
+---
+title: "Integrations overview"
+description: "Connect Milvus with the AI tools, frameworks, and data pipelines in your stack."
+---
+
+Milvus integrates with the broader AI development ecosystem — from LLM application frameworks and embedding models to data pipelines and operational tools. Use the categories below to find integrations relevant to your use case.
+
+## AI frameworks
+
+Build retrieval-augmented generation (RAG) pipelines and other LLM applications using Milvus as the vector store backend.
+
+<CardGroup cols={2}>
+  <Card title="LangChain" icon="link" href="/integrations/langchain">
+    Use Milvus as a `VectorStore` in LangChain chains, agents, and RAG pipelines.
+  </Card>
+  <Card title="LlamaIndex" icon="database" href="/integrations/llamaindex">
+    Use Milvus as a `VectorStore` with LlamaIndex for document indexing and querying.
+  </Card>
+  <Card title="Haystack" icon="magnifying-glass">
+    Plug Milvus into Haystack pipelines as a document store for semantic search and RAG.
+  </Card>
+  <Card title="CrewAI" icon="users">
+    Give CrewAI agents long-term memory backed by Milvus vector search.
+  </Card>
+  <Card title="DSPy" icon="code">
+    Compile DSPy programs that retrieve context from Milvus collections.
+  </Card>
+</CardGroup>
+
+## Embedding models
+
+Milvus is embedding-model agnostic. You can generate vectors outside Milvus and pass them in, or use `pymilvus[model]` to call embedding APIs directly in your ingestion pipeline.
+
+<CardGroup cols={2}>
+  <Card title="OpenAI" icon="star">
+    Generate dense embeddings with `text-embedding-3-small` or `text-embedding-3-large`.
+  </Card>
+  <Card title="HuggingFace" icon="face-smile">
+    Use any model from the HuggingFace Hub, including BERT, E5, and BGE variants.
+  </Card>
+  <Card title="Cohere" icon="bolt">
+    Call the Cohere Embed API for multilingual and domain-specific embeddings.
+  </Card>
+  <Card title="Sentence Transformers" icon="arrow-right-arrow-left">
+    Run open-source sentence embedding models locally without an API key.
+  </Card>
+</CardGroup>
+
+### pymilvus[model]
+
+`pymilvus[model]` is a utility layer bundled with the Milvus Python SDK. It wraps embedding model APIs and local model runtimes behind a consistent interface so you can swap providers without rewriting your ingestion code.
+
+```bash
+pip install "pymilvus[model]"
+```
+
+```python
+from pymilvus.model.dense import OpenAIEmbeddingFunction
+
+ef = OpenAIEmbeddingFunction(model_name="text-embedding-3-small", api_key="YOUR_KEY")
+vectors = ef.encode_documents(["Milvus stores vectors", "Fast approximate nearest neighbor search"])
+```
+
+<Tip>
+  `pymilvus[model]` supports dense embeddings, sparse embeddings (BM25, SPLADE), and reranking models. See the [embeddings documentation](https://milvus.io/docs/embeddings.md) for the full list of supported providers.
+</Tip>
+
+## Data pipelines
+
+Move data into and out of Milvus from your existing data infrastructure.
+
+<CardGroup cols={2}>
+  <Card title="Apache Spark" icon="fire">
+    Use the Spark-Milvus Connector to write DataFrames directly to Milvus collections from Spark jobs.
+  </Card>
+  <Card title="Apache Kafka" icon="tower-broadcast">
+    Stream data into Milvus in real time using `kafka-connect-milvus`, a Kafka Connect sink connector.
+  </Card>
+  <Card title="Airbyte" icon="rotate">
+    Sync data from hundreds of sources into Milvus using the Airbyte Milvus destination connector.
+  </Card>
+  <Card title="Fivetran" icon="plug">
+    Load data from Fivetran-supported sources into Milvus with the Fivetran Milvus destination.
+  </Card>
+</CardGroup>
+
+## Management tools
+
+<CardGroup cols={2}>
+  <Card title="Attu" icon="display">
+    A graphical administration interface for Milvus. Browse collections, run queries, and inspect indexes without writing code.
+  </Card>
+  <Card title="Birdwatcher" icon="bug">
+    A CLI debugging tool for inspecting Milvus metadata, WAL segments, and internal state stored in etcd.
+  </Card>
+  <Card title="Milvus CDC" icon="arrows-rotate">
+    Change Data Capture tool for real-time data replication between Milvus instances — useful for disaster recovery and multi-region deployments.
+  </Card>
+</CardGroup>
+
+## Monitoring
+
+<CardGroup cols={2}>
+  <Card title="Prometheus" icon="chart-line">
+    Milvus exposes a `/metrics` endpoint that Prometheus can scrape. Pre-built recording rules are provided in the Milvus Helm chart.
+  </Card>
+  <Card title="Grafana" icon="chart-bar">
+    Official Grafana dashboards visualize query latency, throughput, index build progress, and resource utilization for Milvus clusters.
+  </Card>
+</CardGroup>
+
+<Note>
+  For a complete list of integrations maintained by the Milvus community, see the [integrations overview](https://milvus.io/docs/integrations_overview.md) on the Milvus website.
+</Note>

@@ -1,0 +1,61 @@
+---
+title: "List Collections"
+description: "Returns the names of all collections in the current Milvus database."
+---
+
+Returns a list of collection names in the current database. Optionally, you can specify a database name to list collections in a different database.
+
+## Parameters
+
+<ParamField path="db_name" type="string">
+  Name of the database to list collections from. When omitted, collections from the currently active database are returned. Use this parameter when working in a multi-database deployment.
+</ParamField>
+
+## Response
+
+<ResponseField name="collection_names" type="string[]">
+  List of collection name strings. Returns an empty list if the database contains no collections.
+</ResponseField>
+
+## Example
+
+<CodeGroup>
+
+```python List collections in the current database
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+collections = client.list_collections()
+print(collections)
+# Example output: ['articles', 'products', 'embeddings']
+```
+
+```python List collections in a specific database
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+collections = client.list_collections(db_name="analytics")
+print(collections)
+# Example output: ['events', 'sessions']
+```
+
+```python Check if a collection exists
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+collection_name = "articles"
+
+if collection_name in client.list_collections():
+    print(f"'{collection_name}' exists.")
+else:
+    print(f"'{collection_name}' does not exist.")
+```
+
+</CodeGroup>
+
+<Note>
+  To check for the existence of a single collection, prefer `has_collection` over iterating the result of `list_collections`. `has_collection` is a direct existence check and avoids fetching the full list.
+</Note>

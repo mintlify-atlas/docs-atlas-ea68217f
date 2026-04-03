@@ -1,0 +1,120 @@
+---
+title: "Describe Collection"
+description: "Returns the schema, status, and statistics for a Milvus collection."
+---
+
+Returns detailed information about a collection, including its full schema, aliases, shard configuration, consistency level, load state, and entity count.
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  Name of the collection to describe.
+</ParamField>
+
+## Response
+
+<ResponseField name="collection_name" type="string">
+  Name of the collection.
+</ResponseField>
+
+<ResponseField name="schema" type="object">
+  Full schema definition of the collection.
+
+  <Expandable title="properties">
+    <ResponseField name="name" type="string">
+      Name of the collection as recorded in the schema.
+    </ResponseField>
+
+    <ResponseField name="description" type="string">
+      Human-readable description of the collection.
+    </ResponseField>
+
+    <ResponseField name="auto_id" type="boolean">
+      Whether Milvus auto-generates entity IDs.
+    </ResponseField>
+
+    <ResponseField name="fields" type="object[]">
+      List of field definitions.
+
+      <Expandable title="FieldSchema properties">
+        <ResponseField name="name" type="string">
+          Name of the field.
+        </ResponseField>
+
+        <ResponseField name="dtype" type="DataType">
+          Data type of the field (e.g., `INT64`, `FLOAT_VECTOR`, `VARCHAR`).
+        </ResponseField>
+
+        <ResponseField name="is_primary" type="boolean">
+          Whether this field is the primary key.
+        </ResponseField>
+
+        <ResponseField name="is_partition_key" type="boolean">
+          Whether this field is used as a partition key.
+        </ResponseField>
+
+        <ResponseField name="dim" type="int">
+          Dimensionality of vector fields. Present only for vector field types.
+        </ResponseField>
+
+        <ResponseField name="max_length" type="int">
+          Maximum byte length. Present only for `VARCHAR` fields.
+        </ResponseField>
+
+        <ResponseField name="description" type="string">
+          Human-readable description of the field.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="aliases" type="string[]">
+  List of aliases assigned to this collection.
+</ResponseField>
+
+<ResponseField name="num_shards" type="int">
+  Number of shards the collection is partitioned into for write distribution.
+</ResponseField>
+
+<ResponseField name="consistency_level" type="string">
+  Read consistency guarantee configured for the collection (`Strong`, `Bounded`, `Session`, or `Eventually`).
+</ResponseField>
+
+<ResponseField name="load_state" type="string">
+  Current load state of the collection. Possible values:
+
+  - `NotLoad` — Collection is not loaded into memory.
+  - `Loading` — Collection is being loaded.
+  - `Loaded` — Collection is fully loaded and ready for search.
+</ResponseField>
+
+<ResponseField name="num_entities" type="int">
+  Approximate count of entities in the collection. This value reflects the last flushed state and may not include recently inserted data that has not yet been flushed.
+</ResponseField>
+
+## Example
+
+<CodeGroup>
+
+```python Describe a collection
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+info = client.describe_collection(collection_name="articles")
+
+print(info["collection_name"])   # articles
+print(info["load_state"])        # NotLoad / Loading / Loaded
+print(info["num_entities"])      # approximate row count
+print(info["consistency_level"]) # Bounded
+
+for field in info["schema"]["fields"]:
+    print(field["name"], field["dtype"])
+```
+
+</CodeGroup>
+
+<Note>
+  `num_entities` reflects the last sealed and flushed segment count. Entities inserted after the last flush are not included. Call `flush` if you need an up-to-date count before reading `num_entities`.
+</Note>

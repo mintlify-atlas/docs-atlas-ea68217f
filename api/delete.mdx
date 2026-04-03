@@ -1,0 +1,102 @@
+---
+title: "Delete"
+description: "Delete entities from a Milvus collection by primary key values or a filter expression."
+---
+
+The `delete` method removes entities from a collection. You can target specific entities by providing their primary key values, or delete any set of entities that match a boolean filter expression. Both modes can be combined with a partition name to restrict the scope of the operation.
+
+<Note>
+  Deletion in Milvus is a **soft delete**. Deleted entities are marked with a tombstone and become invisible to queries and searches immediately, but the underlying storage is not reclaimed until the next compaction cycle.
+</Note>
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  The name of the collection from which to delete entities.
+</ParamField>
+
+<ParamField path="ids" type="list[int] | list[str]">
+  A list of primary key values to delete. Use this when you know the exact IDs of the entities to remove.
+
+  Either `ids` or `filter` must be provided, but not both at the same time.
+</ParamField>
+
+<ParamField path="filter" type="string">
+  A boolean expression that selects entities for deletion. Any entity for which the expression evaluates to `true` is deleted.
+
+  Example expressions:
+  - `"id in [1, 2, 3]"` — delete by explicit IDs using filter syntax
+  - `"category == 'news'"` — delete by scalar field value
+  - `"score < 0.5"` — delete entities with a score below threshold
+  - `"age >= 30 and city == 'London'"` — compound condition
+
+  Either `filter` or `ids` must be provided.
+</ParamField>
+
+<ParamField path="partition_name" type="string">
+  Restrict the delete operation to a specific partition. If omitted, the operation applies across all partitions in the collection.
+</ParamField>
+
+## Response
+
+<ResponseField name="delete_count" type="integer">
+  The number of entities that were marked for deletion.
+</ResponseField>
+
+## Examples
+
+<Tabs>
+  <Tab title="Delete by IDs">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    res = client.delete(
+        collection_name="my_collection",
+        ids=[1, 2, 5],
+    )
+
+    print(res)
+    # {"delete_count": 3}
+    ```
+  </Tab>
+  <Tab title="Delete by filter">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    # Delete all entities where the category field equals "outdated"
+    res = client.delete(
+        collection_name="my_collection",
+        filter="category == 'outdated'",
+    )
+
+    print(res)
+    # {"delete_count": 42}
+    ```
+  </Tab>
+  <Tab title="Delete from partition">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    res = client.delete(
+        collection_name="my_collection",
+        ids=[10, 20, 30],
+        partition_name="archive_partition",
+    )
+
+    print(f"Deleted {res['delete_count']} entities from archive_partition")
+    ```
+  </Tab>
+</Tabs>
+
+## Notes
+
+- **Immediate visibility**: Deleted entities are instantly invisible to search and query operations, even before compaction runs.
+- **Compaction**: The actual disk space used by deleted entities is reclaimed during background compaction. You can trigger compaction manually with `client.compact(collection_name)`.
+- **Filter expressions**: The filter language supports standard comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`), logical operators (`and`, `or`, `not`), and set membership (`in`, `not in`). JSON and array fields support additional operators.
+- **Scale**: Deleting a large number of entities by filter can be slow relative to targeted deletion by IDs, because Milvus must scan the index to resolve the filter. For bulk deletions, prefer batching by IDs when possible.

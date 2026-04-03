@@ -1,0 +1,254 @@
+---
+title: "Collections"
+description: "Learn how to create, configure, and manage Milvus collections — the primary organizational unit for storing and searching vector data."
+---
+
+A collection in Milvus is a table-like structure that holds your entities (rows). Each collection has a fixed schema defining its fields, and must be loaded into memory before you can run searches or queries against it.
+
+## Create a collection
+
+There are two ways to create a collection: quick create (minimal config) or custom schema (full control).
+
+<Tabs>
+  <Tab title="Quick create">
+    The simplest way to create a collection is to provide a name and a vector dimension. Milvus automatically creates a primary key field (`id`) and a vector field (`vector`), and enables auto-ID generation.
+
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient("milvus_demo.db")
+
+    client.create_collection(
+        collection_name="articles",
+        dimension=768,
+    )
+    ```
+
+    <Note>
+      Quick create uses L2 (Euclidean distance) as the default metric and builds an AUTOINDEX on the vector field. You can override these defaults with additional parameters.
+    </Note>
+  </Tab>
+  <Tab title="Custom schema">
+    Define a full schema when you need control over field names, data types, indexing strategies, or metric type.
+
+    ```python
+    from pymilvus import MilvusClient, DataType
+
+    client = MilvusClient("milvus_demo.db")
+
+    schema = client.create_schema(
+        auto_id=False,
+        enable_dynamic_field=True,
+    )
+
+    # Primary key field
+    schema.add_field(field_name="article_id", datatype=DataType.INT64, is_primary=True)
+
+    # Scalar fields
+    schema.add_field(field_name="title",      datatype=DataType.VARCHAR, max_length=512)
+    schema.add_field(field_name="category",   datatype=DataType.VARCHAR, max_length=128)
+    schema.add_field(field_name="views",      datatype=DataType.INT64)
+    schema.add_field(field_name="score",      datatype=DataType.FLOAT)
+    schema.add_field(field_name="published",  datatype=DataType.BOOL)
+    schema.add_field(field_name="metadata",   datatype=DataType.JSON)
+    schema.add_field(field_name="tags",       datatype=DataType.ARRAY,
+                     element_type=DataType.VARCHAR, max_capacity=10)
+
+    # Vector field
+    schema.add_field(field_name="embedding", datatype=DataType.FLOAT_VECTOR, dim=768)
+
+    # Index parameters
+    index_params = client.prepare_index_params()
+    index_params.add_index(
+        field_name="embedding",
+        index_type="HNSW",
+        metric_type="COSINE",
+        params={"M": 16, "efConstruction": 200},
+    )
+
+    client.create_collection(
+        collection_name="articles",
+        schema=schema,
+        index_params=index_params,
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Schema field types
+
+<AccordionGroup>
+  <Accordion title="Primary key field">
+    Every collection must have exactly one primary key field. The primary key uniquely identifies each entity.
+
+    | Property | Description |
+    |---|---|
+    | `is_primary=True` | Marks the field as the primary key |
+    | `auto_id=True` | Milvus generates IDs automatically |
+    | `datatype` | `INT64` or `VARCHAR` |
+
+    ```python
+    # Auto-generated integer ID
+    schema.add_field(
+        field_name="id",
+        datatype=DataType.INT64,
+        is_primary=True,
+        auto_id=True,
+    )
+
+    # Manual string ID
+    schema.add_field(
+        field_name="doc_id",
+        datatype=DataType.VARCHAR,
+        max_length=64,
+        is_primary=True,
+        auto_id=False,
+    )
+    ```
+
+    <Tip>
+      Use `auto_id=True` when you do not have a natural unique identifier for your data. Use manual IDs when you need to correlate Milvus entities with records in an external system.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="Vector field">
+    The vector field stores your embeddings. A collection can have multiple vector fields for hybrid search scenarios.
+
+    | Data type | Description |
+    |---|---|
+    | `FLOAT_VECTOR` | 32-bit float embeddings (most common) |
+    | `FLOAT16_VECTOR` | 16-bit float, lower memory usage |
+    | `BFLOAT16_VECTOR` | Brain float, common in ML training |
+    | `BINARY_VECTOR` | Binary embeddings, use Hamming distance |
+    | `SPARSE_FLOAT_VECTOR` | Sparse vectors for BM25/SPLADE |
+
+    ```python
+    schema.add_field(
+        field_name="dense_embedding",
+        datatype=DataType.FLOAT_VECTOR,
+        dim=768,
+    )
+    ```
+  </Accordion>
+
+  <Accordion title="Scalar fields">
+    Scalar fields store structured data alongside your vectors for filtering and retrieval.
+
+    | Type | Description | Extra params |
+    |---|---|---|
+    | `VARCHAR` | Variable-length string | `max_length` (required) |
+    | `INT8`, `INT16`, `INT32`, `INT64` | Signed integers | — |
+    | `FLOAT`, `DOUBLE` | Floating-point numbers | — |
+    | `BOOL` | Boolean | — |
+    | `JSON` | Arbitrary JSON document | — |
+    | `ARRAY` | Fixed-type array | `element_type`, `max_capacity` |
+
+    ```python
+    schema.add_field(field_name="title",    datatype=DataType.VARCHAR, max_length=1024)
+    schema.add_field(field_name="views",    datatype=DataType.INT64)
+    schema.add_field(field_name="rating",   datatype=DataType.FLOAT)
+    schema.add_field(field_name="active",   datatype=DataType.BOOL)
+    schema.add_field(field_name="props",    datatype=DataType.JSON)
+    schema.add_field(
+        field_name="labels",
+        datatype=DataType.ARRAY,
+        element_type=DataType.VARCHAR,
+        max_capacity=20,
+    )
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Load and release a collection
+
+A collection must be **loaded** into memory before you can run searches or queries. Loading reads the data and index into query node memory.
+
+<Steps>
+  <Step title="Load the collection">
+    ```python
+    client.load_collection(collection_name="articles")
+    ```
+
+    For large collections, loading can take several seconds. The call blocks until the collection is fully loaded.
+  </Step>
+  <Step title="Run searches or queries">
+    Once loaded, the collection is available for ANN search, full-text search, and point lookups.
+  </Step>
+  <Step title="Release the collection (optional)">
+    Release a collection to free query node memory when it is no longer needed.
+
+    ```python
+    client.release_collection(collection_name="articles")
+    ```
+
+    <Note>
+      Releasing a collection does not delete data. You can reload it at any time.
+    </Note>
+  </Step>
+</Steps>
+
+### Check load status
+
+```python
+load_state = client.get_load_state(collection_name="articles")
+print(load_state)
+# {'state': <LoadState: Loaded>}
+```
+
+## Partitions
+
+Partitions subdivide a collection into named segments. Searching within a partition is faster than searching the entire collection when your data has a natural grouping.
+
+```python
+# Create partitions
+client.create_partition(collection_name="articles", partition_name="sports")
+client.create_partition(collection_name="articles", partition_name="technology")
+
+# List partitions
+partitions = client.list_partitions(collection_name="articles")
+print(partitions)
+# ['_default', 'sports', 'technology']
+
+# Drop a partition
+client.drop_partition(collection_name="articles", partition_name="sports")
+```
+
+<Tip>
+  Every collection has a `_default` partition. Entities inserted without specifying a partition go into `_default`.
+</Tip>
+
+## Collection properties
+
+### TTL (time-to-live)
+
+Set a TTL in seconds to automatically expire and delete entities after a given duration.
+
+```python
+client.alter_collection_properties(
+    collection_name="articles",
+    properties={"collection.ttl.seconds": 86400},  # 24 hours
+)
+```
+
+### Replica count
+
+Increase the number of in-memory replicas to improve search throughput and fault tolerance.
+
+```python
+client.load_collection(
+    collection_name="articles",
+    replica_number=2,
+)
+```
+
+<Warning>
+  Each replica requires additional memory proportional to the collection size. Ensure your query nodes have sufficient resources before increasing the replica count.
+</Warning>
+
+## Drop a collection
+
+```python
+client.drop_collection(collection_name="articles")
+```
+
+Dropping a collection permanently deletes all data, indexes, and schema definitions. This action cannot be undone.

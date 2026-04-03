@@ -1,0 +1,96 @@
+---
+title: "Drop Index"
+description: "Removes an index from a field in a collection."
+---
+
+Removes a previously built index from a field. After the index is dropped, vector search on that field is no longer possible until you build a new index with `create_index`.
+
+Dropping an index is irreversible. The underlying vector data is not affected, but the index structure is permanently deleted.
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  Name of the collection that contains the index to drop.
+</ParamField>
+
+<ParamField path="field_name" type="string" required>
+  Name of the field whose index you want to remove.
+</ParamField>
+
+<ParamField path="index_name" type="string">
+  Name of the specific index to drop. Required when a field has more than one index. When omitted and only one index exists on the field, that index is dropped automatically.
+</ParamField>
+
+## Examples
+
+<CodeGroup>
+
+```python Drop an index by field name
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+client.drop_index(
+    collection_name="articles",
+    field_name="embedding",
+)
+```
+
+```python Drop a named index
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+client.drop_index(
+    collection_name="articles",
+    field_name="embedding",
+    index_name="embedding_hnsw_idx",
+)
+```
+
+```python Release collection, drop index, then rebuild
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+# A loaded collection must be released before its index can be dropped.
+client.release_collection(collection_name="articles")
+
+client.drop_index(
+    collection_name="articles",
+    field_name="embedding",
+    index_name="embedding_hnsw_idx",
+)
+
+# Rebuild with different parameters.
+index_params = client.prepare_index_params()
+index_params.add_index(
+    field_name="embedding",
+    index_name="embedding_hnsw_idx",
+    index_type="HNSW",
+    metric_type="COSINE",
+    params={"M": 32, "efConstruction": 128},
+)
+
+client.create_index(
+    collection_name="articles",
+    index_params=index_params,
+)
+
+# Reload the collection after the new index finishes building.
+client.load_collection(collection_name="articles")
+```
+
+</CodeGroup>
+
+<Warning>
+  You must release the collection before dropping an index on it if the collection is currently loaded into memory. Attempting to drop an index on a loaded collection raises an error. Call `release_collection` first, then `drop_index`, then rebuild the index with `create_index`, and finally reload with `load_collection`.
+</Warning>
+
+<Warning>
+  Dropping an index does not delete the underlying data. However, once the index is removed, vector similarity search on that field is unavailable until a new index is built. Scalar filter queries that do not involve vector search are not affected.
+</Warning>
+
+<Note>
+  If a collection has multiple indexes (for example, one on a dense vector field and one on a sparse vector field), dropping one index does not affect the others.
+</Note>

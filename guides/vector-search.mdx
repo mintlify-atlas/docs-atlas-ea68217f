@@ -1,0 +1,273 @@
+---
+title: "Vector Search"
+description: "Run approximate nearest neighbor (ANN) searches in Milvus using the Python SDK. Covers basic search, metric types, range search, pagination, and grouping."
+---
+
+Vector search finds the `k` entities whose embeddings are closest to a query vector, measured by a distance metric. Milvus uses approximate nearest neighbor (ANN) algorithms to return results in milliseconds, even across billions of vectors.
+
+<Note>
+  The collection must be loaded into memory before you can search it. Call `client.load_collection()` if you have not done so already.
+</Note>
+
+## Basic ANN search
+
+```python
+from pymilvus import MilvusClient
+
+client = MilvusClient("milvus_demo.db")
+
+# A single query vector (dimension must match the collection's vector field)
+query_vector = [0.12, 0.34, ..., 0.56]
+
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],       # list of query vectors; supports batch
+    limit=5,                   # number of results (topK)
+    output_fields=["title", "category", "views"],
+)
+
+for hits in results:
+    for hit in hits:
+        print(f"id={hit['id']}  distance={hit['distance']:.4f}  title={hit['entity']['title']}")
+```
+
+<ParamField body="collection_name" type="string" required>
+  The collection to search.
+</ParamField>
+
+<ParamField body="data" type="list[list[float]]" required>
+  One or more query vectors. Batch multiple queries in a single request for higher throughput.
+</ParamField>
+
+<ParamField body="limit" type="int" required>
+  Maximum number of results to return per query vector (topK). Maximum value depends on index type (up to 16,384 for most indexes).
+</ParamField>
+
+<ParamField body="output_fields" type="list[str]">
+  Scalar fields to include in the result. Omit to return only IDs and distances.
+</ParamField>
+
+<ParamField body="filter" type="string">
+  Boolean filter expression applied before or during the ANN search. See [Metadata Filtering](/guides/metadata-filtering).
+</ParamField>
+
+## Metric types
+
+The metric type determines how distances between vectors are calculated. Set the metric type when creating the index; it must match at search time.
+
+<Tabs>
+  <Tab title="L2 (Euclidean)">
+    Measures the straight-line distance between two vectors. Smaller values indicate greater similarity. Best for embeddings where magnitude matters (e.g., image features).
+
+    ```python
+    results = client.search(
+        collection_name="articles",
+        data=[query_vector],
+        limit=5,
+        search_params={"metric_type": "L2"},
+    )
+    ```
+  </Tab>
+  <Tab title="IP (Inner Product)">
+    Measures the dot product. Higher values indicate greater similarity. Use with normalized vectors (equivalent to cosine similarity for unit-length vectors).
+
+    ```python
+    results = client.search(
+        collection_name="articles",
+        data=[query_vector],
+        limit=5,
+        search_params={"metric_type": "IP"},
+    )
+    ```
+  </Tab>
+  <Tab title="COSINE">
+    Measures the cosine of the angle between vectors. Values range from -1 to 1 (higher = more similar). Preferred for NLP embeddings.
+
+    ```python
+    results = client.search(
+        collection_name="articles",
+        data=[query_vector],
+        limit=5,
+        search_params={"metric_type": "COSINE"},
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Index-specific search parameters
+
+Different index types expose tunable accuracy/speed trade-offs through `search_params`.
+
+<Tabs>
+  <Tab title="HNSW">
+    <ParamField body="ef" type="int">
+      Size of the dynamic candidate list during search. Higher values increase recall at the cost of latency. Must be greater than or equal to `limit`. Range: `[1, 32768]`.
+    </ParamField>
+
+    ```python
+    results = client.search(
+        collection_name="articles",
+        data=[query_vector],
+        limit=10,
+        search_params={
+            "metric_type": "COSINE",
+            "params": {"ef": 100},
+        },
+    )
+    ```
+  </Tab>
+  <Tab title="IVF_FLAT / IVF_SQ8">
+    <ParamField body="nprobe" type="int">
+      Number of cluster centroids to visit during search. Higher values improve recall but increase latency. Range: `[1, nlist]`.
+    </ParamField>
+
+    ```python
+    results = client.search(
+        collection_name="articles",
+        data=[query_vector],
+        limit=10,
+        search_params={
+            "metric_type": "L2",
+            "params": {"nprobe": 16},
+        },
+    )
+    ```
+  </Tab>
+  <Tab title="FLAT (brute force)">
+    FLAT indexes perform an exhaustive scan and always return exact nearest neighbors. No additional search parameters are required.
+
+    ```python
+    results = client.search(
+        collection_name="articles",
+        data=[query_vector],
+        limit=10,
+        search_params={"metric_type": "L2"},
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Range search
+
+Range search returns all entities whose distance to the query vector falls within a specified range, rather than a fixed topK.
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    limit=50,
+    search_params={
+        "metric_type": "COSINE",
+        "params": {
+            "ef": 200,
+            "radius": 0.3,         # minimum similarity threshold (cosine: lower = less similar)
+            "range_filter": 0.9,   # maximum similarity threshold (cosine: higher = more similar)
+        },
+    },
+)
+```
+
+<Note>
+  For L2 and Hamming, `radius` is the **maximum** distance (exclusive). For COSINE and IP, `radius` is the **minimum** score (inclusive). `range_filter` sets the opposite bound to further restrict results.
+</Note>
+
+## Pagination
+
+Use the `offset` parameter to paginate through results beyond the first page.
+
+```python
+# Page 1: results 1–10
+page1 = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    limit=10,
+    offset=0,
+)
+
+# Page 2: results 11–20
+page2 = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    limit=10,
+    offset=10,
+)
+```
+
+<Warning>
+  Large offsets are expensive because Milvus must retrieve and discard `offset` results before returning the page. For deep pagination over very large result sets, consider using a filter-based approach instead.
+</Warning>
+
+## Search in specific partitions
+
+Restrict the search to one or more partitions to improve throughput when your data is partitioned by a logical grouping.
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    limit=10,
+    partition_names=["technology", "science"],
+    output_fields=["title", "category"],
+)
+```
+
+## Grouping search results
+
+Group search results by a scalar field value to get the best match from each distinct group. This is useful when your collection has multiple documents from the same source and you want one representative result per source.
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    limit=5,
+    group_by_field="category",     # return one result per category
+    output_fields=["title", "category"],
+)
+```
+
+<Tip>
+  Grouping search is commonly used in RAG pipelines to ensure diversity — for example, returning the top passage from each unique document rather than multiple passages from the same document.
+</Tip>
+
+## Batch search
+
+Submit multiple query vectors in a single request to amortize network overhead.
+
+```python
+query_vectors = [
+    [0.12, 0.34, ..., 0.56],
+    [0.78, 0.21, ..., 0.90],
+    [0.55, 0.66, ..., 0.77],
+]
+
+results = client.search(
+    collection_name="articles",
+    data=query_vectors,          # 3 queries at once
+    limit=5,
+    output_fields=["title"],
+)
+
+# results[0] -> hits for query_vectors[0]
+# results[1] -> hits for query_vectors[1]
+# results[2] -> hits for query_vectors[2]
+for i, hits in enumerate(results):
+    print(f"Query {i}:")
+    for hit in hits:
+        print(f"  {hit['entity']['title']}  (distance={hit['distance']:.4f})")
+```
+
+## Search with metadata filter
+
+Combine vector similarity with scalar filtering to narrow results before (or during) the ANN search.
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    limit=10,
+    filter="category == 'technology' and views > 1000",
+    output_fields=["title", "category", "views"],
+)
+```
+
+See [Metadata Filtering](/guides/metadata-filtering) for the full filter expression syntax.

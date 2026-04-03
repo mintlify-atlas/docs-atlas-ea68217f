@@ -1,0 +1,206 @@
+---
+title: "LlamaIndex integration"
+description: "Use Milvus as a vector store in LlamaIndex for document indexing, retrieval, and query engines."
+---
+
+[LlamaIndex](https://www.llamaindex.ai/) is a data framework for LLM applications focused on ingestion, indexing, and retrieval. The `llama-index-vector-stores-milvus` package provides a `MilvusVectorStore` that integrates Milvus into LlamaIndex pipelines.
+
+## Installation
+
+```bash
+pip install llama-index-vector-stores-milvus llama-index-core
+```
+
+<Note>
+  LlamaIndex uses OpenAI embeddings and the OpenAI LLM by default. Set `OPENAI_API_KEY` in your environment, or configure a different embedding model and LLM explicitly.
+</Note>
+
+## Connect to Milvus
+
+Choose a connection target based on your deployment:
+
+<Tabs>
+  <Tab title="Milvus Lite">
+    Milvus Lite runs in-process and stores data in a local file. No server required — ideal for local development and notebooks.
+
+    ```python
+    from llama_index.vector_stores.milvus import MilvusVectorStore
+
+    vector_store = MilvusVectorStore(
+        uri="milvus_demo.db",
+        dim=1536,
+        overwrite=True,
+    )
+    ```
+  </Tab>
+  <Tab title="Milvus Standalone">
+    Connect to a running Milvus server by specifying the URI with host and port.
+
+    ```python
+    from llama_index.vector_stores.milvus import MilvusVectorStore
+
+    vector_store = MilvusVectorStore(
+        uri="http://localhost:19530",
+        collection_name="llamaindex_demo",
+        dim=1536,
+        overwrite=True,
+    )
+    ```
+  </Tab>
+  <Tab title="Zilliz Cloud">
+    Connect to a fully managed Milvus cluster on [Zilliz Cloud](https://zilliz.com/cloud) using your cluster URI and API key.
+
+    ```python
+    from llama_index.vector_stores.milvus import MilvusVectorStore
+
+    vector_store = MilvusVectorStore(
+        uri="https://YOUR_CLUSTER_ID.api.gcp-us-west1.zillizcloud.com",
+        token="YOUR_API_KEY",
+        collection_name="llamaindex_demo",
+        dim=1536,
+        overwrite=True,
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Basic usage
+
+<Steps>
+  <Step title="Initialize MilvusVectorStore">
+    Create a `MilvusVectorStore` with your connection URI and the embedding dimension that matches your embedding model. Set `overwrite=True` to recreate the collection on each run during development.
+
+    ```python
+    from llama_index.vector_stores.milvus import MilvusVectorStore
+
+    vector_store = MilvusVectorStore(uri="milvus_demo.db", dim=1536, overwrite=True)
+    ```
+
+    The `dim` parameter must match the output dimension of your embedding model — for example, `1536` for OpenAI `text-embedding-3-small` and `text-embedding-ada-002`.
+  </Step>
+  <Step title="Create a StorageContext">
+    Wrap the vector store in a `StorageContext` so LlamaIndex knows where to persist index data.
+
+    ```python
+    from llama_index.core import StorageContext
+
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    ```
+  </Step>
+  <Step title="Build a VectorStoreIndex from documents">
+    Pass your documents and the storage context to `VectorStoreIndex.from_documents`. LlamaIndex chunks, embeds, and upserts all documents into Milvus automatically.
+
+    ```python
+    from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
+
+    documents = SimpleDirectoryReader("./data").load_data()
+    index = VectorStoreIndex.from_documents(
+        documents,
+        storage_context=storage_context,
+    )
+    ```
+  </Step>
+  <Step title="Create a query engine and run queries">
+    Call `as_query_engine` to create a query engine that retrieves context from Milvus and synthesizes answers using an LLM.
+
+    ```python
+    query_engine = index.as_query_engine()
+    response = query_engine.query("What is Milvus?")
+    print(response)
+    ```
+  </Step>
+</Steps>
+
+## Complete example
+
+```python
+from llama_index.vector_stores.milvus import MilvusVectorStore
+from llama_index.core import VectorStoreIndex, StorageContext
+
+vector_store = MilvusVectorStore(uri="milvus_demo.db", dim=1536, overwrite=True)
+storage_context = StorageContext.from_defaults(vector_store=vector_store)
+index = VectorStoreIndex.from_documents(documents, storage_context=storage_context)
+query_engine = index.as_query_engine()
+response = query_engine.query("What is Milvus?")
+print(response)
+```
+
+## Load an existing index
+
+If you have already ingested documents into Milvus, reconstruct the index from the existing vector store without re-embedding:
+
+```python
+from llama_index.vector_stores.milvus import MilvusVectorStore
+from llama_index.core import VectorStoreIndex, StorageContext
+
+# Connect without overwrite=True to keep existing data
+vector_store = MilvusVectorStore(uri="milvus_demo.db", dim=1536)
+storage_context = StorageContext.from_defaults(vector_store=vector_store)
+index = VectorStoreIndex.from_vector_store(vector_store, storage_context=storage_context)
+
+query_engine = index.as_query_engine()
+response = query_engine.query("Explain vector search.")
+print(response)
+```
+
+## Metadata filtering
+
+Pass a `MetadataFilters` object to your query engine to restrict retrieval to documents matching specific metadata conditions.
+
+```python
+from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
+
+filters = MetadataFilters(
+    filters=[ExactMatchFilter(key="category", value="technical")]
+)
+
+query_engine = index.as_query_engine(filters=filters)
+response = query_engine.query("Explain dense embeddings.")
+print(response)
+```
+
+You can also filter at retrieval time using a `VectorIndexRetriever`:
+
+```python
+from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
+
+retriever = VectorIndexRetriever(
+    index=index,
+    similarity_top_k=5,
+    filters=MetadataFilters(
+        filters=[ExactMatchFilter(key="year", value="2024")]
+    ),
+)
+
+nodes = retriever.retrieve("What changed in 2024?")
+for node in nodes:
+    print(node.score, node.text[:100])
+```
+
+## Hybrid search
+
+`MilvusVectorStore` supports hybrid search combining dense vector search with sparse BM25 retrieval. Enable it by setting `enable_sparse=True` when initializing the store.
+
+```python
+from llama_index.vector_stores.milvus import MilvusVectorStore
+from llama_index.core import VectorStoreIndex, StorageContext
+
+vector_store = MilvusVectorStore(
+    uri="milvus_demo.db",
+    dim=1536,
+    enable_sparse=True,   # enable BM25 sparse vectors
+    overwrite=True,
+)
+storage_context = StorageContext.from_defaults(vector_store=vector_store)
+index = VectorStoreIndex.from_documents(documents, storage_context=storage_context)
+
+# Hybrid search is used automatically when the index is queried
+query_engine = index.as_query_engine()
+response = query_engine.query("sparse and dense retrieval")
+print(response)
+```
+
+<Tip>
+  Hybrid search improves recall for keyword-heavy queries where dense embeddings alone may miss exact term matches. The dense and sparse scores are combined using reciprocal rank fusion (RRF) by default.
+</Tip>

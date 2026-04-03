@@ -1,0 +1,252 @@
+---
+title: "Search modes"
+description: "ANN search, range search, hybrid search, full-text search, metadata filtering, consistency levels, and grouping search in Milvus."
+---
+
+Milvus supports several search modes that can be combined to match the requirements of your application. This page explains each mode, when to use it, and the key parameters that control behavior.
+
+## ANN search
+
+Approximate Nearest Neighbor (ANN) search finds the `topK` vectors most similar to a query vector. It is the fundamental search mode in Milvus.
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=[[0.12, 0.34, ...]],   # one or more query vectors
+    anns_field="embedding",
+    limit=10,                    # topK
+    output_fields=["title", "score"],
+)
+```
+
+The index type configured on `anns_field` determines the algorithm used. You can pass index-specific search parameters via the `search_params` argument:
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    anns_field="embedding",
+    search_params={"metric_type": "L2", "params": {"ef": 64}},  # HNSW ef
+    limit=10,
+)
+```
+
+<Tip>
+Higher `ef` (for HNSW) or `nprobe` (for IVF) improves recall at the cost of latency. Tune these parameters against your recall and latency targets.
+</Tip>
+
+## Range search
+
+Range search returns all vectors whose distance to the query vector falls within a specified threshold, rather than a fixed `topK`. Use it when you care about similarity quality rather than a fixed result count.
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    anns_field="embedding",
+    search_params={
+        "metric_type": "L2",
+        "params": {
+            "radius": 1.0,          # outer boundary — exclude beyond this distance
+            "range_filter": 0.0,    # inner boundary — exclude closer than this distance
+        },
+    },
+    limit=100,  # cap on the number of results returned
+)
+```
+
+| Parameter | Description |
+|---|---|
+| `radius` | Maximum distance from the query. Vectors farther than this are excluded. |
+| `range_filter` | Minimum distance from the query. Vectors closer than this are excluded. Useful to exclude near-duplicates. |
+
+<Note>
+For `L2`, lower distances mean higher similarity. For `IP` and `COSINE`, the direction is reversed: set `radius` to the minimum acceptable score.
+</Note>
+
+## Metadata filtering
+
+Milvus can filter search results on scalar fields using boolean expressions. Filtering can run before or after the vector search phase.
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    anns_field="embedding",
+    filter='published == true and score > 0.8',
+    limit=10,
+    output_fields=["title", "score"],
+)
+```
+
+### Expression syntax
+
+| Operator | Example |
+|---|---|
+| Comparison | `score > 0.8`, `year == 2024`, `status != "draft"` |
+| Logical | `a and b`, `a or b`, `not a` |
+| Range | `score >= 0.5 and score <= 1.0` |
+| List membership | `category in ["news", "blog"]` |
+| Null check | `metadata["author"] != null` |
+| JSON path | `metadata["region"] == "us-east"` |
+| Array contains | `ARRAY_CONTAINS(tags, "milvus")` |
+| String prefix | `title like "Milvus%"` |
+
+### Pre-filter vs. post-filter
+
+<Tabs>
+  <Tab title="Pre-filter (default)">
+    The scalar filter is applied first, reducing the candidate set before the ANN index is consulted. Pre-filtering guarantees that all returned results satisfy the filter, but it may reduce recall when the filter is highly selective because the ANN search operates on a smaller candidate pool.
+
+    This is the default behavior in Milvus.
+  </Tab>
+  <Tab title="Post-filter">
+    The ANN search runs first and retrieves a large candidate pool. The scalar filter is then applied to the candidates. Post-filtering can achieve higher vector recall for selective filters, but the final result count may be less than `topK` if many candidates are filtered out.
+
+    Enable post-filtering by setting `"params": {"nq_max_topk": N}` in your index configuration or adjusting the `offset` and `limit` accordingly.
+  </Tab>
+</Tabs>
+
+## Hybrid search
+
+Hybrid search combines results from multiple vector fields — or from multiple searches on the same field — into a single ranked result list. This is the recommended approach for applications that need to blend dense semantic search with sparse keyword search.
+
+```python
+from pymilvus import AnnSearchRequest, RRFRanker, WeightedRanker
+
+# Dense vector search request
+dense_req = AnnSearchRequest(
+    data=[dense_query_vector],
+    anns_field="dense_embedding",
+    param={"metric_type": "IP", "params": {"ef": 100}},
+    limit=20,
+)
+
+# Sparse vector search request (BM25)
+sparse_req = AnnSearchRequest(
+    data=[sparse_query_vector],
+    anns_field="sparse_embedding",
+    param={"metric_type": "IP"},
+    limit=20,
+)
+
+# Merge results with Reciprocal Rank Fusion
+results = client.hybrid_search(
+    collection_name="articles",
+    reqs=[dense_req, sparse_req],
+    ranker=RRFRanker(k=60),
+    limit=10,
+    output_fields=["title"],
+)
+```
+
+### Rerankers
+
+| Ranker | Description |
+|---|---|
+| `RRFRanker(k)` | Reciprocal Rank Fusion. Merges ranked lists from multiple searches by summing `1 / (k + rank)` scores. `k=60` is a commonly used default. |
+| `WeightedRanker(w1, w2, ...)` | Assigns a weight to each search's score and sums them. Use when you have a prior belief about the relative importance of each signal. |
+
+<Tip>
+RRF is the safer default when you are unsure how to weight signals — it is robust to score magnitude differences between dense and sparse searches.
+</Tip>
+
+## Full-text search (BM25)
+
+Milvus supports native BM25 full-text search using sparse vectors. You define a tokenizer function on a `VARCHAR` field, and Milvus automatically maintains a `SPARSE_FLOAT_VECTOR` representation of each document's term weights.
+
+```python
+from pymilvus import Function, FunctionType
+
+# Define the BM25 function on the schema
+bm25_function = Function(
+    name="bm25",
+    input_field_names=["body"],           # VARCHAR field
+    output_field_names=["sparse_body"],   # SPARSE_FLOAT_VECTOR field
+    function_type=FunctionType.BM25,
+)
+schema.add_function(bm25_function)
+
+# At search time, pass a text query — Milvus tokenizes it automatically
+results = client.search(
+    collection_name="articles",
+    data=["vector database scaling"],   # plain text, not a vector
+    anns_field="sparse_body",
+    search_params={"metric_type": "BM25"},
+    limit=10,
+)
+```
+
+Full-text search and dense ANN search can be combined in a hybrid search request for retrieval pipelines that need both semantic and keyword relevance.
+
+## Consistency levels
+
+Milvus is a distributed system with asynchronous replication. The consistency level controls how fresh the data must be before a query is executed.
+
+| Level | Description | Use case |
+|---|---|---|
+| `Strong` | Query waits until all in-flight writes are visible. Guarantees that you see your own writes. Highest latency. | Financial records, audit logs |
+| `Bounded` | Query waits until writes older than a configured staleness bound (e.g., 5 seconds) are visible. | Most production workloads |
+| `Session` | Query sees all writes issued by the same client session. Other clients' recent writes may not be visible. | Per-user personalization |
+| `Eventually` | Query executes immediately with no guarantee about write visibility. Lowest latency. | Analytics, approximate counts |
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    anns_field="embedding",
+    limit=10,
+    consistency_level="Bounded",  # or "Strong", "Session", "Eventually"
+)
+```
+
+<Note>
+If the data is not fresh enough to satisfy the requested consistency level, Milvus suspends the query until the data catches up or a timeout is reached.
+</Note>
+
+## Grouping search
+
+Grouping search returns at most one result per unique value of a scalar field. Use it to avoid result lists dominated by a single source document when each document has multiple chunks.
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    anns_field="embedding",
+    limit=10,
+    group_by_field="doc_id",      # return at most one chunk per document
+    group_size=1,                  # how many results per group to return
+    output_fields=["title", "chunk_index"],
+)
+```
+
+| Parameter | Description |
+|---|---|
+| `group_by_field` | Scalar field whose distinct values define the groups. |
+| `group_size` | Maximum number of results to return per group value. |
+
+<Tip>
+Grouping search is particularly useful for RAG applications that chunk long documents. Without grouping, a single relevant document could fill the top-K results with many similar chunks, crowding out other relevant documents.
+</Tip>
+
+## Query (non-vector)
+
+The `query` method retrieves rows by scalar filter expression without a vector similarity component. Use it for primary key lookups, exact match retrieval, or inspection of stored metadata.
+
+```python
+rows = client.query(
+    collection_name="articles",
+    filter='category == "tutorial" and published == true',
+    output_fields=["id", "title", "score"],
+    limit=50,
+)
+```
+
+<CardGroup cols={2}>
+  <Card title="Index types" icon="list-tree" href="/concepts/index-types">
+    Understand how index parameters affect search recall and latency.
+  </Card>
+  <Card title="Hybrid search guide" icon="magnifying-glass" href="/guides/hybrid-search">
+    End-to-end walkthrough of combining dense and sparse search.
+  </Card>
+</CardGroup>

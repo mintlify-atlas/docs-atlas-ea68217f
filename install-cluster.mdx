@@ -1,0 +1,279 @@
+---
+title: "Install Milvus Cluster"
+description: "Deploy a distributed Milvus cluster on Kubernetes using Helm. Scales horizontally to billions of vectors and tens of thousands of queries per second."
+---
+
+Milvus Cluster is the production deployment mode. It runs as a set of stateless Kubernetes microservices backed by etcd (metadata), MinIO or S3 (object storage), and Pulsar or Kafka (message streaming). Each component scales independently, allowing you to handle write-heavy and read-heavy workloads by adding data nodes or query nodes respectively.
+
+<Note>
+  For single-machine deployments without Kubernetes, see [Milvus Standalone](/install-standalone). For quick local experimentation, see the [Quickstart](/quickstart).
+</Note>
+
+## Architecture overview
+
+A Milvus Cluster consists of the following components:
+
+| Component | Role |
+|-----------|------|
+| **proxy** | User-facing gateway. Receives SDK/gRPC/HTTP requests and routes them to the appropriate internal services. |
+| **mixcoord** | Combined coordinator process that runs rootcoord, datacoord, and querycoord in a single binary for simplified deployments. |
+| **rootcoord** | Manages DDL operations (create/drop collection), global timestamps, and access control metadata. |
+| **datacoord** | Tracks segment assignment, manages data node tasks, and orchestrates compaction and index building. |
+| **querycoord** | Manages query node topology, load balancing of segments, and replica placement. |
+| **datanode** | Subscribes to the message stream and writes data to object storage as sealed segments. |
+| **querynode** | Loads segments into memory and executes vector search and scalar filtering queries. |
+| **streamingnode** | Manages the write-ahead log (WAL) and streaming ingestion pipeline. |
+| **indexnode** | Builds vector indexes (HNSW, IVF, DiskANN, etc.) on sealed segments asynchronously. |
+
+## Prerequisites
+
+- **Kubernetes** 1.22 or later — a running cluster accessible via `kubectl`
+- **Helm** 3.x — [install guide](https://helm.sh/docs/intro/install/)
+- **kubectl** configured to point at your cluster
+- At least **12 GB of RAM** available across cluster nodes for a minimal deployment
+- A default **StorageClass** available in the cluster for persistent volumes
+
+Verify your tools:
+
+```bash
+kubectl version --client
+helm version
+```
+
+## Steps
+
+<Steps>
+  <Step title="Add the Milvus Helm repository">
+    Register the official Milvus Helm chart repository and update the local index:
+
+    ```bash
+    helm repo add milvus https://zilliztech.github.io/milvus-helm/
+    helm repo update milvus
+    ```
+
+    Confirm the repo is available:
+
+    ```bash
+    helm search repo milvus/milvus --versions | head -5
+    ```
+  </Step>
+
+  <Step title="Create a dedicated namespace">
+    It is good practice to isolate Milvus in its own Kubernetes namespace:
+
+    ```bash
+    kubectl create namespace milvus
+    ```
+  </Step>
+
+  <Step title="Install Milvus Cluster">
+    Install the chart with sensible defaults. This deploys the full cluster including etcd, MinIO, and Pulsar as in-cluster dependencies:
+
+    ```bash
+    helm install my-milvus milvus/milvus \
+      --namespace milvus \
+      --set cluster.enabled=true \
+      --set etcd.replicaCount=3 \
+      --set minio.mode=distributed \
+      --wait
+    ```
+
+    The `--wait` flag blocks until all pods reach a ready state (may take 5–10 minutes on first install while images are pulled).
+
+    <Tip>
+      For a faster minimal install suitable for evaluation (single replicas, no HA), use `--set etcd.replicaCount=1 --set minio.mode=standalone`. Do not use this configuration in production.
+    </Tip>
+  </Step>
+
+  <Step title="Verify the deployment">
+    Check that all pods are running:
+
+    ```bash
+    kubectl get pods -n milvus
+    ```
+
+    A healthy cluster shows all pods in `Running` status with `1/1` or `N/N` ready containers:
+
+    ```
+    NAME                                    READY   STATUS    RESTARTS   AGE
+    my-milvus-datacoord-...                 1/1     Running   0          3m
+    my-milvus-datanode-...                  1/1     Running   0          3m
+    my-milvus-indexnode-...                 1/1     Running   0          3m
+    my-milvus-mixcoord-...                  1/1     Running   0          3m
+    my-milvus-proxy-...                     1/1     Running   0          3m
+    my-milvus-querynode-...                 1/1     Running   0          3m
+    my-milvus-streamingnode-...             1/1     Running   0          3m
+    my-milvus-etcd-0                        1/1     Running   0          3m
+    my-milvus-minio-...                     1/1     Running   0          3m
+    my-milvus-pulsar-...                    1/1     Running   0          3m
+    ```
+
+    Check the health endpoint of the proxy service:
+
+    ```bash
+    kubectl port-forward service/my-milvus 9091:9091 -n milvus &
+    curl http://localhost:9091/healthz
+    ```
+
+    A healthy cluster returns:
+
+    ```
+    OK
+    ```
+  </Step>
+
+  <Step title="Connect with pymilvus">
+    Forward the gRPC port and connect using the Python SDK:
+
+    ```bash
+    kubectl port-forward service/my-milvus 19530:19530 -n milvus &
+    ```
+
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(
+        uri="http://localhost:19530",
+        token="root:Milvus",   # default credentials; change in production
+    )
+
+    print(client.list_collections())  # should print []
+    ```
+
+    In production, expose the proxy service via a `LoadBalancer` or `Ingress` instead of port forwarding.
+  </Step>
+</Steps>
+
+## Expose Milvus externally
+
+By default the proxy `Service` is of type `ClusterIP`. To expose it outside the cluster:
+
+<Tabs>
+  <Tab title="LoadBalancer">
+    ```bash
+    helm upgrade my-milvus milvus/milvus \
+      --namespace milvus \
+      --set service.type=LoadBalancer
+    ```
+
+    Get the external IP:
+
+    ```bash
+    kubectl get service my-milvus -n milvus
+    ```
+  </Tab>
+  <Tab title="NodePort">
+    ```bash
+    helm upgrade my-milvus milvus/milvus \
+      --namespace milvus \
+      --set service.type=NodePort \
+      --set service.nodePort=30530
+    ```
+
+    Connect using `<node-ip>:30530`.
+  </Tab>
+</Tabs>
+
+## Scaling components
+
+Scale individual components by adjusting replica counts. Read-heavy workloads benefit from more query nodes; write-heavy workloads benefit from more data nodes.
+
+```bash
+# Scale query nodes to 4 replicas
+kubectl scale deployment my-milvus-querynode -n milvus --replicas=4
+
+# Scale data nodes to 2 replicas
+kubectl scale deployment my-milvus-datanode -n milvus --replicas=2
+```
+
+To persist scaling settings across Helm upgrades, use `helm upgrade` with `--set`:
+
+```bash
+helm upgrade my-milvus milvus/milvus \
+  --namespace milvus \
+  --set queryNode.replicas=4 \
+  --set dataNode.replicas=2
+```
+
+## Upgrading Milvus
+
+```bash
+helm repo update milvus
+
+helm upgrade my-milvus milvus/milvus \
+  --namespace milvus \
+  --reuse-values
+```
+
+The `--reuse-values` flag preserves your existing Helm values. Check the [release notes](https://github.com/milvus-io/milvus/releases) before upgrading between minor versions.
+
+## Uninstalling
+
+```bash
+helm uninstall my-milvus --namespace milvus
+```
+
+<Warning>
+  This removes all Kubernetes resources managed by Helm but retains PersistentVolumeClaims (PVCs). To also delete PVCs and all stored data:
+
+  ```bash
+  kubectl delete pvc --all -n milvus
+  ```
+</Warning>
+
+## Using external dependencies
+
+For production deployments it is recommended to use managed external services rather than the bundled in-cluster etcd, MinIO, and Pulsar:
+
+<AccordionGroup>
+  <Accordion title="External etcd">
+    ```bash
+    helm install my-milvus milvus/milvus \
+      --namespace milvus \
+      --set etcd.enabled=false \
+      --set externalEtcd.enabled=true \
+      --set externalEtcd.endpoints[0]=<etcd-host>:2379
+    ```
+  </Accordion>
+  <Accordion title="External S3 / MinIO">
+    ```bash
+    helm install my-milvus milvus/milvus \
+      --namespace milvus \
+      --set minio.enabled=false \
+      --set externalS3.enabled=true \
+      --set externalS3.host=<s3-endpoint> \
+      --set externalS3.port=443 \
+      --set externalS3.accessKey=<access-key> \
+      --set externalS3.secretKey=<secret-key> \
+      --set externalS3.bucketName=<bucket-name> \
+      --set externalS3.useSSL=true
+    ```
+  </Accordion>
+  <Accordion title="External Pulsar or Kafka">
+    ```bash
+    # Use Kafka instead of Pulsar
+    helm install my-milvus milvus/milvus \
+      --namespace milvus \
+      --set pulsar.enabled=false \
+      --set kafka.enabled=true \
+      --set kafka.name=<kafka-release-name>
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/operations/configuration">
+    Tune memory limits, index parameters, log levels, and resource quotas.
+  </Card>
+  <Card title="Authentication" icon="lock" href="/operations/authentication">
+    Enable user authentication and change the default root password.
+  </Card>
+  <Card title="Access control" icon="shield" href="/operations/access-control">
+    Configure RBAC roles and grant privileges to users and collections.
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Set up Prometheus and Grafana dashboards for cluster observability.
+  </Card>
+</CardGroup>

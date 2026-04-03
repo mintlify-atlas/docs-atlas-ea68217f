@@ -1,0 +1,313 @@
+---
+title: "Index types"
+description: "Every index type Milvus supports, when to use each one, and the key build and search parameters you need to configure."
+---
+
+A vector index is a data structure built on top of your stored vectors to make similarity search faster. Without an index, every search requires scanning all vectors (brute force). With the right index, Milvus can find approximate nearest neighbors orders of magnitude faster.
+
+<Note>
+You must load a collection before searching. Milvus loads segments and their indexes into query node memory during the load operation.
+</Note>
+
+## How to choose an index
+
+| Scenario | Recommended index |
+|---|---|
+| Best recall + speed tradeoff, fits in memory | **HNSW** |
+| Memory-constrained, millions of vectors | **IVF_PQ** |
+| Billion-scale, low memory budget | **DiskANN** |
+| GPU acceleration available | **GPU_CAGRA** |
+| Binary or hash descriptors | **BIN_IVF_FLAT** |
+| Full-text / sparse keyword search | **SPARSE_INVERTED_INDEX** |
+| Small dataset or exact ground truth | **FLAT** |
+
+## In-memory indexes for float vectors
+
+These indexes operate entirely in RAM and support `FLOAT_VECTOR`, `FLOAT16_VECTOR`, and `BFLOAT16_VECTOR` fields.
+
+<AccordionGroup>
+  <Accordion title="FLAT — exact brute-force search">
+    FLAT performs an exhaustive scan of every vector. It always returns the true exact nearest neighbors (100% recall). Use it when your dataset is small enough that speed is not a concern, or when you need exact ground truth for benchmarking.
+
+    **Build parameters:** none
+
+    **Search parameters:** none
+
+    ```python
+    index_params = {
+        "index_type": "FLAT",
+        "metric_type": "L2",
+        "params": {}
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="IVF_FLAT — inverted file index">
+    IVF (Inverted File) clusters vectors into `nlist` Voronoi cells using k-means. At search time, only the `nprobe` nearest cells are scanned. IVF_FLAT stores vectors in their original precision (no quantization), so recall is high at the cost of memory.
+
+    | Parameter | Phase | Description |
+    |---|---|---|
+    | `nlist` | Build | Number of cluster cells. Typical range: 64–4096. |
+    | `nprobe` | Search | Number of cells to probe. Higher = better recall, slower search. |
+
+    ```python
+    index_params = {
+        "index_type": "IVF_FLAT",
+        "metric_type": "L2",
+        "params": {"nlist": 1024}
+    }
+    search_params = {"nprobe": 16}
+    ```
+
+    <Tip>
+    A good starting point is `nlist = 4 * sqrt(n)` where `n` is the number of vectors, and `nprobe` around 5–10% of `nlist`.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="IVF_SQ8 — scalar quantization">
+    IVF_SQ8 applies scalar quantization to each vector dimension: each 32-bit float is compressed to an 8-bit integer. This reduces memory to roughly 25% of IVF_FLAT at a small accuracy loss.
+
+    | Parameter | Phase | Description |
+    |---|---|---|
+    | `nlist` | Build | Number of cluster cells. |
+    | `nprobe` | Search | Number of cells to probe. |
+
+    ```python
+    index_params = {
+        "index_type": "IVF_SQ8",
+        "metric_type": "L2",
+        "params": {"nlist": 1024}
+    }
+    search_params = {"nprobe": 16}
+    ```
+  </Accordion>
+
+  <Accordion title="IVF_PQ — product quantization">
+    IVF_PQ decomposes each high-dimensional vector into `m` sub-vectors and quantizes each sub-vector independently. The result is a very compact representation: significant memory savings, but with a larger recall trade-off than IVF_SQ8. Best for memory-constrained deployments with millions of vectors.
+
+    | Parameter | Phase | Description |
+    |---|---|---|
+    | `nlist` | Build | Number of cluster cells. |
+    | `m` | Build | Number of sub-vector groups. Must divide `dim` evenly. |
+    | `nbits` | Build | Bits per sub-quantizer code (default 8). |
+    | `nprobe` | Search | Number of cells to probe. |
+
+    ```python
+    index_params = {
+        "index_type": "IVF_PQ",
+        "metric_type": "L2",
+        "params": {"nlist": 1024, "m": 8, "nbits": 8}
+    }
+    search_params = {"nprobe": 16}
+    ```
+  </Accordion>
+
+  <Accordion title="HNSW — hierarchical navigable small world">
+    HNSW builds a multi-layer graph. Upper layers are sparse (long-range navigation); lower layers are dense (local refinement). Search starts at the top layer and greedily descends toward the query. HNSW consistently achieves the best recall-to-latency ratio among in-memory indexes.
+
+    | Parameter | Phase | Description |
+    |---|---|---|
+    | `M` | Build | Maximum number of edges per node per layer. Range: 4–64. Higher = better recall, more memory, slower build. |
+    | `efConstruction` | Build | Search scope during index construction. Range: 8–512. Higher = better quality index, slower build. |
+    | `ef` | Search | Search scope at query time. Must be ≥ `topK`. Range: `topK`–32768. |
+
+    ```python
+    index_params = {
+        "index_type": "HNSW",
+        "metric_type": "L2",
+        "params": {"M": 16, "efConstruction": 200}
+    }
+    search_params = {"ef": 64}
+    ```
+
+    <Tip>
+    For most production workloads, start with `M=16`, `efConstruction=200`, and tune `ef` at search time to balance recall vs. latency.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="SCANN — scalable approximate nearest neighbor">
+    SCANN (Scalable Approximate Nearest Neighbors) uses quantization with an anisotropic loss function and a selective search strategy for high recall at low latency. It is optimized for modern CPUs and works well when HNSW memory usage is a concern.
+
+    ```python
+    index_params = {
+        "index_type": "SCANN",
+        "metric_type": "L2",
+        "params": {"nlist": 1024}
+    }
+    search_params = {"nprobe": 16}
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Disk-based index
+
+<AccordionGroup>
+  <Accordion title="DiskANN — billion-scale on SSD">
+    DiskANN is a graph-based index designed for datasets that do not fit in memory. The graph and compressed vectors are stored on an NVMe SSD; only a small in-memory cache is required. DiskANN enables billion-scale search with recall competitive with HNSW at a fraction of the memory cost.
+
+    | Parameter | Phase | Description |
+    |---|---|---|
+    | `search_list` | Build | Candidate list size during graph construction. Range: 75–800. |
+    | `search_list` | Search | Candidate list size during search. Must be ≥ `topK`. |
+    | `beam_width` | Search | Number of parallel I/O requests per search step. |
+
+    ```python
+    index_params = {
+        "index_type": "DISKANN",
+        "metric_type": "L2",
+        "params": {"search_list": 100}
+    }
+    search_params = {"search_list": 100, "beam_width": 8}
+    ```
+
+    <Warning>
+    DiskANN requires NVMe storage. Performance degrades significantly on spinning disks or network-attached storage.
+    </Warning>
+  </Accordion>
+</AccordionGroup>
+
+## GPU indexes
+
+GPU indexes offload vector computation to NVIDIA GPUs. They are available when Milvus is compiled with GPU support.
+
+<Tabs>
+  <Tab title="GPU_CAGRA">
+    CAGRA (CUDA Approximate Graph-based Rapid Acceleration) is NVIDIA's graph-based index. It achieves the highest throughput of any index type in Milvus and is designed for large-batch and high-QPS workloads.
+
+    | Parameter | Phase | Description |
+    |---|---|---|
+    | `intermediate_graph_degree` | Build | Degree before pruning. Affects recall. |
+    | `graph_degree` | Build | Final graph degree after pruning. |
+    | `itopk_size` | Search | Intermediate result pool size. Must be ≥ `topK`. |
+
+    ```python
+    index_params = {
+        "index_type": "GPU_CAGRA",
+        "metric_type": "L2",
+        "params": {
+            "intermediate_graph_degree": 64,
+            "graph_degree": 32,
+        }
+    }
+    search_params = {"itopk_size": 128}
+    ```
+  </Tab>
+  <Tab title="GPU_IVF_FLAT">
+    IVF_FLAT accelerated on GPU. The build and search semantics are identical to the CPU version; the GPU accelerates the distance computations.
+
+    ```python
+    index_params = {
+        "index_type": "GPU_IVF_FLAT",
+        "metric_type": "L2",
+        "params": {"nlist": 1024}
+    }
+    search_params = {"nprobe": 16}
+    ```
+  </Tab>
+  <Tab title="GPU_IVF_PQ">
+    IVF_PQ accelerated on GPU. Combines product quantization's memory efficiency with GPU compute throughput.
+
+    ```python
+    index_params = {
+        "index_type": "GPU_IVF_PQ",
+        "metric_type": "L2",
+        "params": {"nlist": 1024, "m": 8, "nbits": 8}
+    }
+    search_params = {"nprobe": 16}
+    ```
+  </Tab>
+  <Tab title="GPU_BRUTE_FORCE">
+    Exact brute-force search on GPU. Returns 100% recall. Useful for small datasets where GPU parallelism provides enough throughput.
+
+    ```python
+    index_params = {
+        "index_type": "GPU_BRUTE_FORCE",
+        "metric_type": "L2",
+        "params": {}
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Binary vector indexes
+
+Binary vector indexes operate on `BINARY_VECTOR` fields. Distance is measured with Hamming or Jaccard.
+
+| Index | Description |
+|---|---|
+| `BIN_FLAT` | Exact brute-force on binary vectors. |
+| `BIN_IVF_FLAT` | IVF clustering on binary vectors. Parameters: `nlist` (build), `nprobe` (search). |
+
+```python
+index_params = {
+    "index_type": "BIN_IVF_FLAT",
+    "metric_type": "HAMMING",
+    "params": {"nlist": 512}
+}
+search_params = {"nprobe": 8}
+```
+
+## Sparse vector indexes
+
+Sparse vector indexes operate on `SPARSE_FLOAT_VECTOR` fields. They are optimized for high-dimensional sparse representations such as BM25 term weights or SPLADE embeddings.
+
+| Index | Description |
+|---|---|
+| `SPARSE_INVERTED_INDEX` | Inverted index over non-zero dimensions. Exact search within each posting list. |
+| `SPARSE_WAND` | Uses the WAND (Weak AND) algorithm to skip low-scoring candidates for faster approximate search. |
+
+```python
+index_params = {
+    "index_type": "SPARSE_INVERTED_INDEX",
+    "metric_type": "IP",
+    "params": {"drop_ratio_build": 0.2}  # prune dimensions with low weight
+}
+search_params = {"drop_ratio_search": 0.1}
+```
+
+## Metric types
+
+The metric type must match the index type and vector type.
+
+| Metric | Supported vector types | Description |
+|---|---|---|
+| `L2` | Float vectors | Euclidean distance. Lower = more similar. |
+| `IP` | Float vectors | Inner product. Higher = more similar. Equivalent to cosine when vectors are L2-normalized. |
+| `COSINE` | Float vectors | Cosine similarity. Milvus normalizes vectors internally. Higher = more similar. |
+| `HAMMING` | Binary vectors | Number of bit positions that differ. Lower = more similar. |
+| `JACCARD` | Binary vectors | Intersection over union of set bits. Lower = more similar. |
+
+<Note>
+To use cosine similarity without the `COSINE` metric, normalize your vectors to unit length before inserting and use `IP`. The result is mathematically identical and compatible with all IVF indexes.
+</Note>
+
+## Creating and dropping indexes
+
+```python
+# Create an index on the vector field
+client.create_index(
+    collection_name="articles",
+    index_params=client.prepare_index_params()
+        .add_index(
+            field_name="embedding",
+            index_type="HNSW",
+            metric_type="L2",
+            params={"M": 16, "efConstruction": 200},
+        )
+)
+
+# Check index state
+client.describe_index(collection_name="articles", index_name="embedding")
+
+# Drop an index
+client.drop_index(collection_name="articles", index_name="embedding")
+```
+
+<CardGroup cols={2}>
+  <Card title="Search modes" icon="magnifying-glass" href="/concepts/search-modes">
+    Learn how ANN, range, and hybrid search use indexes at query time.
+  </Card>
+  <Card title="Vector search guide" icon="search" href="/guides/vector-search">
+    Configure search parameters and interpret results.
+  </Card>
+</CardGroup>

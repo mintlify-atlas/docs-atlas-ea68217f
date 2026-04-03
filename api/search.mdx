@@ -1,0 +1,191 @@
+---
+title: "Search"
+description: "Perform an Approximate Nearest Neighbor (ANN) vector search on a Milvus collection."
+---
+
+The `search` method finds the `limit` vectors in a collection that are most similar to each query vector, according to the specified distance metric. It supports pre-filtering with scalar expressions, output of additional fields, pagination, and range search.
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  The name of the collection to search.
+</ParamField>
+
+<ParamField path="data" type="list[list[float]]" required>
+  One or more query vectors. Each inner list represents a single query vector whose dimension must match the indexed vector field. Multiple query vectors are processed in a single batch.
+</ParamField>
+
+<ParamField path="limit" type="integer" required>
+  The maximum number of results to return per query vector (topK). Must be a positive integer. The upper bound is controlled by `queryNode.maxTopK` (default 16,384).
+</ParamField>
+
+<ParamField path="anns_field" type="string">
+  The name of the vector field to search. Required when the collection has more than one vector field; optional otherwise (Milvus infers the field automatically for single-vector collections).
+</ParamField>
+
+<ParamField path="search_params" type="dict">
+  Index-specific search parameters.
+
+  <Expandable title="properties">
+    <ParamField path="metric_type" type="string">
+      Distance metric: `"L2"`, `"IP"` (inner product), `"COSINE"`, `"HAMMING"`, or `"JACCARD"`. Must match the metric used when the index was created.
+    </ParamField>
+    <ParamField path="params" type="dict">
+      Algorithm-specific parameters. Common values:
+
+      - HNSW: `{"ef": 64}` — larger values increase recall at the cost of latency.
+      - IVF\_FLAT / IVF\_SQ8 / IVF\_PQ: `{"nprobe": 10}` — number of clusters to scan.
+      - DISKANN: `{"search_list": 100}`.
+      - SCANN: `{"nprobe": 16, "reorder_k": 100}`.
+    </ParamField>
+    <ParamField path="radius" type="float">
+      For range search: the outer boundary distance. Only entities whose distance to the query is **less than** (L2) or **greater than** (IP/COSINE) this value are returned.
+    </ParamField>
+    <ParamField path="range_filter" type="float">
+      For range search: the inner boundary distance. Creates an annular search window between `range_filter` and `radius`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="filter" type="string">
+  A boolean expression applied as a pre-filter before ANN search. Only entities satisfying this expression are considered as candidates. Supports all scalar field types and standard operators (`==`, `!=`, `<`, `in`, `and`, `or`, etc.).
+</ParamField>
+
+<ParamField path="output_fields" type="list[string]">
+  Scalar (or vector) fields to include in each result. By default, only the primary key and distance are returned. Pass `["*"]` to return all fields.
+</ParamField>
+
+<ParamField path="partition_names" type="list[string]">
+  Restrict the search to one or more named partitions. If omitted, all partitions are searched.
+</ParamField>
+
+<ParamField path="offset" type="integer">
+  Number of leading results to skip for pagination. Use together with `limit` to page through results. For example, `offset=20, limit=10` returns results 21–30.
+</ParamField>
+
+<ParamField path="consistency_level" type="string">
+  Read consistency guarantee. Options:
+
+  - `"Strong"` — reads reflect all committed writes.
+  - `"Bounded"` (default) — reads may lag by a bounded staleness window.
+  - `"Session"` — reads reflect writes from the same session.
+  - `"Eventually"` — lowest latency; reads may miss recent writes.
+</ParamField>
+
+## Response
+
+Returns a list of result sets — one per query vector. Each result set is a list of `SearchResult` objects.
+
+<ResponseField name="id" type="int | str">
+  The primary key of the matched entity.
+</ResponseField>
+
+<ResponseField name="distance" type="float">
+  The distance (or similarity score) between the query vector and the matched entity's vector. Lower is closer for L2; higher is closer for IP and COSINE.
+</ResponseField>
+
+<ResponseField name="entity" type="dict">
+  A dictionary containing the values of any requested `output_fields`.
+</ResponseField>
+
+## Examples
+
+<Tabs>
+  <Tab title="Basic search">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    query_vectors = [
+        [0.1, 0.2, 0.3, 0.4, 0.5],
+        [0.9, 0.8, 0.7, 0.6, 0.5],
+    ]
+
+    results = client.search(
+        collection_name="my_collection",
+        data=query_vectors,
+        limit=5,
+        search_params={"metric_type": "COSINE", "params": {"ef": 64}},
+        output_fields=["text", "category"],
+    )
+
+    for hits in results:
+        for hit in hits:
+            print(f"id={hit['id']}, distance={hit['distance']:.4f}, text={hit['entity']['text']}")
+    ```
+  </Tab>
+  <Tab title="Search with filter">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    results = client.search(
+        collection_name="my_collection",
+        data=[[0.3, 0.3, 0.3, 0.3, 0.3]],
+        limit=10,
+        filter="category == 'science' and year >= 2020",
+        search_params={"metric_type": "L2", "params": {"nprobe": 16}},
+        output_fields=["text", "year"],
+    )
+
+    for hit in results[0]:
+        print(hit)
+    ```
+  </Tab>
+  <Tab title="Range search">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    # Return entities whose L2 distance is between 0.1 and 0.8
+    results = client.search(
+        collection_name="my_collection",
+        data=[[0.5, 0.5, 0.5, 0.5, 0.5]],
+        limit=20,
+        search_params={
+            "metric_type": "L2",
+            "params": {
+                "ef": 128,
+                "radius": 0.8,       # outer boundary
+                "range_filter": 0.1, # inner boundary (exclude very close matches)
+            },
+        },
+        output_fields=["text"],
+    )
+
+    for hit in results[0]:
+        print(f"id={hit['id']}, distance={hit['distance']:.4f}")
+    ```
+  </Tab>
+  <Tab title="Paginated search">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    query = [[0.1, 0.4, 0.6, 0.2, 0.8]]
+
+    # Fetch results 11-20
+    results = client.search(
+        collection_name="my_collection",
+        data=query,
+        limit=10,
+        offset=10,
+        search_params={"metric_type": "IP", "params": {"ef": 64}},
+    )
+
+    for hit in results[0]:
+        print(hit)
+    ```
+  </Tab>
+</Tabs>
+
+## Notes
+
+- **Index required**: A vector index must be created on the target field before searching. Searching an un-indexed field triggers a brute-force scan, which is slow for large collections.
+- **Collection must be loaded**: The collection (or target partitions) must be loaded into memory with `load_collection` before searching.
+- **Batch queries**: Passing multiple query vectors in `data` is more efficient than issuing separate requests — Milvus processes the batch in a single round trip.
+- **topK + offset limit**: The sum of `limit` and `offset` cannot exceed `queryNode.maxTopK`.

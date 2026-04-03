@@ -1,0 +1,58 @@
+---
+title: "Drop Collection"
+description: "Permanently deletes a Milvus collection and all its data."
+---
+
+Drops a collection from Milvus, removing its schema definition, all stored entities, indexes, and associated aliases. This operation cannot be undone.
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  Name of the collection to drop.
+</ParamField>
+
+## Response
+
+Returns nothing on success. Raises an exception if the collection does not exist or if the operation fails.
+
+<Warning>
+  Dropping a collection permanently destroys all data stored in it, including entities, indexes, and partition data. There is no soft-delete or recycle bin. Verify the collection name before calling this method.
+</Warning>
+
+## Example
+
+<CodeGroup>
+
+```python Drop with existence check
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+collection_name = "articles"
+
+# Guard against dropping a non-existent collection.
+if client.has_collection(collection_name):
+    client.drop_collection(collection_name=collection_name)
+    print(f"Collection '{collection_name}' dropped.")
+else:
+    print(f"Collection '{collection_name}' does not exist.")
+```
+
+```python Drop unconditionally
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+# Raises an exception if the collection does not exist.
+client.drop_collection(collection_name="articles")
+```
+
+</CodeGroup>
+
+<Note>
+  If the collection is currently loaded into memory, Milvus releases it automatically before dropping it. You do not need to call `release_collection` first.
+</Note>
+
+<Tip>
+  Use `has_collection` to check existence before dropping when your code may run in environments where the collection might not yet have been created (e.g., CI pipelines, teardown scripts).
+</Tip>

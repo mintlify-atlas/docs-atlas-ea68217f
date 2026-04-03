@@ -1,0 +1,263 @@
+---
+title: "Metadata Filtering"
+description: "Filter Milvus search and query results using scalar field expressions. Covers operators, JSON and ARRAY field filtering, and partition key isolation."
+---
+
+Metadata filtering lets you combine vector similarity with boolean conditions on scalar fields. You can apply filters during `search()` to pre-filter candidates before the ANN index, or during `query()` to retrieve entities by scalar conditions alone.
+
+## Filter expressions
+
+A filter expression is a string containing one or more conditions on scalar fields. Milvus evaluates the expression for each candidate entity and returns only those where the expression evaluates to `true`.
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    limit=10,
+    filter="category == 'technology' and views > 1000",
+    output_fields=["title", "category", "views"],
+)
+```
+
+## Comparison operators
+
+| Operator | Example | Description |
+|---|---|---|
+| `==` | `status == 'active'` | Equal to |
+| `!=` | `status != 'deleted'` | Not equal to |
+| `>`  | `views > 500` | Greater than |
+| `<`  | `score < 3.0` | Less than |
+| `>=` | `rating >= 4.5` | Greater than or equal to |
+| `<=` | `price <= 99.99` | Less than or equal to |
+
+```python
+# Numeric comparison
+filter="views >= 1000 and score < 5.0"
+
+# String equality
+filter="category == 'science'"
+
+# Boolean
+filter="published == True"
+```
+
+## Logical operators
+
+Use `and`, `or`, and `not` to combine conditions.
+
+```python
+# Both conditions must be true
+filter="category == 'technology' and views > 500"
+
+# Either condition may be true
+filter="category == 'sports' or category == 'fitness'"
+
+# Negate a condition
+filter="not (status == 'archived')"
+
+# Complex combination
+filter="(category == 'technology' or category == 'science') and views > 200 and published == True"
+```
+
+## Range operators: `in` and `not in`
+
+Test whether a value is a member of a list.
+
+```python
+# Match any value in the list
+filter="category in ['technology', 'science', 'engineering']"
+
+# Exclude values in the list
+filter="category not in ['spam', 'test', 'draft']"
+
+# Numeric list
+filter="priority in [1, 2, 3]"
+```
+
+## String pattern matching: `like`
+
+Use `like` for prefix or substring matching on VARCHAR fields.
+
+```python
+# Prefix match (efficient — uses index)
+filter="title like 'Vector%'"
+
+# Substring match (full scan)
+filter="title like '%database%'"
+```
+
+<Note>
+  Prefix patterns (`'value%'`) can use scalar indexes efficiently. Substring patterns (`'%value%'`) require a full scan of the field and are slower on large collections.
+</Note>
+
+## JSON field filtering
+
+Access nested JSON fields with bracket notation. Milvus supports equality, comparison, and membership tests on JSON values.
+
+```python
+# Equality on a JSON key
+filter="metadata['source'] == 'wikipedia'"
+
+# Numeric comparison on a JSON key
+filter="metadata['word_count'] > 500"
+
+# Nested key access
+filter="metadata['author']['country'] == 'US'"
+
+# Membership test on a JSON key
+filter="metadata['format'] in ['pdf', 'html', 'markdown']"
+```
+
+<Tip>
+  Create a scalar index on frequently filtered JSON keys to avoid full-field scans.
+
+  ```python
+  index_params = client.prepare_index_params()
+  index_params.add_index(
+      field_name="metadata",
+      index_type="INVERTED",
+      index_name="idx_metadata_source",
+      params={"json_path": "metadata['source']", "json_cast_type": "varchar"},
+  )
+  ```
+</Tip>
+
+## ARRAY field filtering
+
+### Check for element membership
+
+```python
+# Check if an array contains a specific value
+filter="ARRAY_CONTAINS(tags, 'machine-learning')"
+
+# Check if array contains all specified values
+filter="ARRAY_CONTAINS_ALL(tags, ['ai', 'nlp'])"
+
+# Check if array contains any of the specified values
+filter="ARRAY_CONTAINS_ANY(tags, ['cv', 'nlp', 'rl'])"
+```
+
+### Filter by array length
+
+```python
+# Entities where the array has at least 3 elements
+filter="ARRAY_LENGTH(tags) >= 3"
+
+# Entities with exactly one tag
+filter="ARRAY_LENGTH(tags) == 1"
+```
+
+### Index access
+
+```python
+# Access by index (0-based)
+filter="tags[0] == 'featured'"
+```
+
+## Pre-filtering vs. post-filtering
+
+Milvus applies filters during the ANN search (pre-filtering by default). The query engine intersects the filter result with the ANN candidate list to return `limit` results that satisfy both the vector similarity and scalar conditions.
+
+```python
+# Pre-filtering (default): filters are applied during ANN candidate retrieval
+results = client.search(
+    collection_name="articles",
+    data=[query_vector],
+    limit=10,
+    filter="category == 'technology'",
+)
+```
+
+<Note>
+  If a very strict filter removes most candidates, Milvus may return fewer than `limit` results. Increase `limit` or relax the filter if this occurs.
+</Note>
+
+## Partition key for tenant isolation
+
+A partition key field routes entities to partitions automatically based on field value. Queries that include a filter on the partition key field are scoped to the matching partition, avoiding a full collection scan.
+
+```python
+from pymilvus import MilvusClient, DataType
+
+schema = client.create_schema(auto_id=True)
+
+# Mark the tenant field as partition key
+schema.add_field(
+    field_name="tenant_id",
+    datatype=DataType.VARCHAR,
+    max_length=64,
+    is_partition_key=True,
+)
+schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=768)
+
+client.create_collection(
+    collection_name="multi_tenant_articles",
+    schema=schema,
+)
+```
+
+When searching, include the partition key in the filter:
+
+```python
+results = client.search(
+    collection_name="multi_tenant_articles",
+    data=[query_vector],
+    limit=10,
+    filter="tenant_id == 'acme-corp'",   # routed to acme-corp's partition
+    output_fields=["title"],
+)
+```
+
+<Tip>
+  The partition key approach supports up to 4096 distinct tenant values without creating separate collections. It is the recommended strategy for SaaS applications serving many tenants from a single Milvus cluster.
+</Tip>
+
+## Query without a vector
+
+Use `client.query()` to retrieve entities purely by scalar conditions, without a vector search.
+
+```python
+# Retrieve all technology articles with more than 1000 views
+entities = client.query(
+    collection_name="articles",
+    filter="category == 'technology' and views > 1000",
+    output_fields=["id", "title", "views"],
+    limit=100,
+)
+
+for entity in entities:
+    print(f"{entity['id']}: {entity['title']} ({entity['views']} views)")
+```
+
+<ParamField body="filter" type="string" required>
+  Boolean expression to match entities.
+</ParamField>
+
+<ParamField body="output_fields" type="list[str]">
+  Fields to return. Defaults to the primary key only.
+</ParamField>
+
+<ParamField body="limit" type="int">
+  Maximum number of entities to return. Defaults to 16,384.
+</ParamField>
+
+## Common filter patterns
+
+```python
+# Date range (stored as Unix timestamp INT64)
+filter="created_at >= 1700000000 and created_at < 1710000000"
+
+# Null / missing check for JSON fields
+filter="metadata['lang'] != null"
+
+# Multi-field compound filter
+filter=(
+    "published == True "
+    "and category in ['technology', 'science'] "
+    "and views >= 500 "
+    "and score > 4.0"
+)
+
+# Partition key + additional scalar filter
+filter="tenant_id == 'acme-corp' and status == 'active'"
+```

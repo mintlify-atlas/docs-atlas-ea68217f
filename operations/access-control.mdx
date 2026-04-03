@@ -1,0 +1,287 @@
+---
+title: "Access Control (RBAC)"
+description: "Use Role-Based Access Control to grant fine-grained permissions to users and isolate access across databases and collections."
+---
+
+Milvus implements Role-Based Access Control (RBAC). You assign privileges to roles, then assign roles to users. RBAC is available when `common.security.authorizationEnabled: true`.
+
+---
+
+## Concepts
+
+| Term | Description |
+|---|---|
+| **User** | A Milvus account with a username and password. |
+| **Role** | A named set of privileges. |
+| **Privilege** | A specific operation permission (e.g., `Search`, `Insert`). |
+| **Privilege group** | A named bundle of related privileges. |
+| **Grant** | The association between a role and a privilege on a resource. |
+
+Users can be assigned multiple roles. A user's effective permissions are the union of all privileges from all assigned roles.
+
+---
+
+## Built-in roles
+
+Milvus includes two built-in roles that cannot be deleted:
+
+| Role | Description |
+|---|---|
+| `admin` | Full access to all resources. Equivalent to a superuser role. |
+| `public` | Read-only access to public collection metadata. Assigned to all users by default. |
+
+The `root` user always has superuser access, regardless of role assignments.
+
+---
+
+## Privilege reference
+
+Privileges are scoped to three levels:
+
+<AccordionGroup>
+  <Accordion title="Collection-level privileges">
+    Applied to a specific collection within a database.
+
+    | Privilege | Operation |
+    |---|---|
+    | `Search` | Run vector similarity search |
+    | `Query` | Run scalar/filter queries |
+    | `Insert` | Insert entities |
+    | `Delete` | Delete entities |
+    | `Upsert` | Upsert entities |
+    | `Load` | Load a collection into memory |
+    | `Release` | Release a collection from memory |
+    | `Flush` | Flush buffered data to storage |
+    | `Compaction` | Trigger manual compaction |
+    | `CreateIndex` | Build an index on a field |
+    | `DropIndex` | Remove an index |
+    | `CreatePartition` | Add partitions |
+    | `DropPartition` | Remove partitions |
+    | `GetLoadState` | Check load status |
+    | `DescribeCollection` | Read collection schema |
+    | `GetStatistics` | Read collection statistics |
+    | `Import` | Bulk import data |
+  </Accordion>
+
+  <Accordion title="Database-level privileges">
+    Applied to all collections within a database.
+
+    | Privilege | Operation |
+    |---|---|
+    | `ShowCollections` | List collections |
+    | `DescribeDatabase` | Read database metadata |
+    | `AlterDatabase` | Modify database properties |
+    | `CreateCollection` | Create new collections |
+    | `DropCollection` | Drop collections |
+  </Accordion>
+
+  <Accordion title="Cluster-level (global) privileges">
+    Applied cluster-wide, not scoped to a specific database or collection.
+
+    | Privilege | Operation |
+    |---|---|
+    | `ListDatabases` | List all databases |
+    | `CreateDatabase` | Create a new database |
+    | `DropDatabase` | Drop a database |
+    | `CreateOwnership` | Create users and roles |
+    | `DropOwnership` | Drop users and roles |
+    | `ManageOwnership` | Grant/revoke role assignments |
+    | `SelectUser` | List users |
+    | `SelectOwnership` | Inspect role-privilege assignments |
+    | `FlushAll` | Flush all collections |
+    | `BackupRBAC` | Export RBAC configuration |
+    | `RestoreRBAC` | Import RBAC configuration |
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Setting up RBAC
+
+<Steps>
+  <Step title="Connect as root">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530", token="root:Milvus")
+    ```
+  </Step>
+
+  <Step title="Create a role">
+    ```python
+    client.create_role(role_name="data_scientist")
+    ```
+  </Step>
+
+  <Step title="Grant privileges to the role">
+    Grant specific privileges on a collection:
+
+    ```python
+    # Grant Search and Query on a specific collection
+    client.grant_privilege(
+        role_name="data_scientist",
+        object_type="Collection",
+        privilege="Search",
+        object_name="my_collection",   # "*" grants on all collections
+        db_name="default"
+    )
+
+    client.grant_privilege(
+        role_name="data_scientist",
+        object_type="Collection",
+        privilege="Query",
+        object_name="my_collection",
+        db_name="default"
+    )
+    ```
+
+    Grant a database-level privilege:
+
+    ```python
+    client.grant_privilege(
+        role_name="data_scientist",
+        object_type="Global",
+        privilege="ShowCollections",
+        object_name="*",
+        db_name="default"
+    )
+    ```
+  </Step>
+
+  <Step title="Create a user">
+    ```python
+    client.create_user(user_name="alice", password="StrongPass1!")
+    ```
+  </Step>
+
+  <Step title="Assign the role to the user">
+    ```python
+    client.grant_role(user_name="alice", role_name="data_scientist")
+    ```
+  </Step>
+
+  <Step title="Verify the setup">
+    ```python
+    # Check which roles a user has
+    print(client.describe_user(user_name="alice"))
+
+    # Check which privileges a role has
+    print(client.describe_role(role_name="data_scientist"))
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Wildcard resource names
+
+Use `"*"` as `object_name` to grant a privilege on all resources of the given type:
+
+```python
+# Allow data_scientist to search all collections in the default database
+client.grant_privilege(
+    role_name="data_scientist",
+    object_type="Collection",
+    privilege="Search",
+    object_name="*",
+    db_name="default"
+)
+```
+
+---
+
+## Read-only analyst example
+
+```python
+# Create an analyst role with read-only access
+client.create_role(role_name="analyst")
+
+read_privileges = ["Search", "Query", "GetLoadState",
+                   "DescribeCollection", "GetStatistics",
+                   "ShowPartitions", "HasPartition"]
+
+for priv in read_privileges:
+    client.grant_privilege(
+        role_name="analyst",
+        object_type="Collection",
+        privilege=priv,
+        object_name="*",
+        db_name="default"
+    )
+
+client.grant_privilege(
+    role_name="analyst",
+    object_type="Global",
+    privilege="ShowCollections",
+    object_name="*",
+    db_name="default"
+)
+
+# Assign to a user
+client.create_user(user_name="bob", password="ReadOnly1!")
+client.grant_role(user_name="bob", role_name="analyst")
+```
+
+---
+
+## Database-level isolation
+
+Create separate databases and assign roles scoped to each database to isolate teams or applications:
+
+```python
+# Create isolated databases
+client.create_database(db_name="team_alpha")
+client.create_database(db_name="team_beta")
+
+# Create per-database roles
+client.create_role(role_name="alpha_writer")
+
+client.grant_privilege(
+    role_name="alpha_writer",
+    object_type="Collection",
+    privilege="Insert",
+    object_name="*",
+    db_name="team_alpha"         # Scoped only to team_alpha
+)
+
+# team_alpha users get no access to team_beta
+```
+
+---
+
+## Revoking access
+
+```python
+# Revoke a privilege from a role
+client.revoke_privilege(
+    role_name="data_scientist",
+    object_type="Collection",
+    privilege="Search",
+    object_name="my_collection",
+    db_name="default"
+)
+
+# Remove a role from a user
+client.revoke_role(user_name="alice", role_name="data_scientist")
+
+# Drop a role entirely (unassign it from all users first)
+client.drop_role(role_name="data_scientist")
+```
+
+---
+
+## Listing and inspecting
+
+```python
+# List all roles
+print(client.list_roles())
+
+# Inspect a role's privileges
+print(client.describe_role(role_name="data_scientist"))
+
+# List all users
+print(client.list_users())
+
+# Show a user's roles and effective privileges
+print(client.describe_user(user_name="alice"))
+```

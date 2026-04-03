@@ -1,0 +1,317 @@
+---
+title: "Backup and Restore"
+description: "Back up Milvus collections, restore from snapshots, migrate data between versions, and replicate with Change Data Capture."
+---
+
+Milvus stores data in two systems: object storage (MinIO/S3) for vector and index data, and etcd for metadata. A complete backup must cover both.
+
+---
+
+## Data architecture overview
+
+| Storage system | What it holds | Backup tool |
+|---|---|---|
+| etcd | All metadata: collection schemas, segment info, partition info, user/role data | `etcdctl snapshot save` |
+| MinIO / S3 | Actual vectors, indexes, binlogs, delta logs | milvus-backup or native object storage tools |
+
+<Warning>
+Backing up only object storage without etcd leaves you unable to interpret the data. Always back up both together, or use the `milvus-backup` tool which coordinates both.
+</Warning>
+
+---
+
+## milvus-backup
+
+`milvus-backup` is the official Milvus backup tool. It performs collection-level backups by creating a consistent snapshot of object storage data.
+
+### Installation
+
+```bash
+# Install from GitHub releases
+wget https://github.com/zilliztech/milvus-backup/releases/latest/download/milvus-backup_Linux_x86_64.tar.gz
+tar -xzf milvus-backup_Linux_x86_64.tar.gz
+chmod +x milvus-backup
+```
+
+### Backup a collection
+
+<Steps>
+  <Step title="Create a backup configuration">
+    Save the following as `backup.yaml`:
+
+    ```yaml
+    milvus:
+      address: localhost
+      port: 19530
+      authorizationEnabled: false
+      # token: "root:Milvus"   # Uncomment if authentication is enabled
+
+    minio:
+      address: localhost
+      port: 9000
+      accessKeyID: minioadmin
+      secretAccessKey: minioadmin
+      useSSL: false
+      bucketName: a-bucket
+      rootPath: files
+
+    backup:
+      maxSegmentGroupSize: 2G   # Max data grouped per backup segment
+      storageType: minio        # minio | s3 | local
+      minio:
+        bucketName: milvus-backup     # Separate bucket for backups
+        rootPath: backup
+    ```
+  </Step>
+  <Step title="Run the backup">
+    ```bash
+    # Back up all collections
+    ./milvus-backup create -n my_backup_20240115
+
+    # Back up specific collections only
+    ./milvus-backup create -n my_backup_20240115 -c my_collection,other_collection
+    ```
+  </Step>
+  <Step title="Verify the backup">
+    ```bash
+    ./milvus-backup list
+    # NAME                  STATE   COLLECTIONS  SIZE
+    # my_backup_20240115    success 2            4.2 GB
+    ```
+  </Step>
+</Steps>
+
+### Restore from backup
+
+```bash
+# Restore to the original collection name
+./milvus-backup restore -n my_backup_20240115
+
+# Restore with a new collection name suffix (avoids name conflicts)
+./milvus-backup restore -n my_backup_20240115 -s _restored
+```
+
+<Note>
+Restoring adds a name suffix by default to prevent overwriting a live collection. Use `-s ""` to restore to the original name, but only when the collection does not already exist.
+</Note>
+
+---
+
+## etcd metadata backup
+
+Back up etcd separately to capture the full metadata snapshot:
+
+```bash
+# Create an etcd snapshot
+etcdctl snapshot save /backup/etcd-snapshot-$(date +%Y%m%d).db \
+  --endpoints=localhost:2379
+
+# Verify the snapshot
+etcdctl snapshot status /backup/etcd-snapshot-20240115.db
+# HASH       REVISION  TOTAL KEYS  TOTAL SIZE
+# 1a2b3c4d   48291     1024        2.4 MB
+```
+
+### Restore etcd from snapshot
+
+<Steps>
+  <Step title="Stop Milvus">
+    Ensure all Milvus components are stopped before restoring etcd.
+  </Step>
+  <Step title="Restore the snapshot">
+    ```bash
+    etcdctl snapshot restore /backup/etcd-snapshot-20240115.db \
+      --data-dir /var/lib/etcd-restored \
+      --name etcd0 \
+      --initial-cluster etcd0=http://localhost:2380 \
+      --initial-cluster-token etcd-cluster-1 \
+      --initial-advertise-peer-urls http://localhost:2380
+    ```
+  </Step>
+  <Step title="Start etcd with the restored data directory and restart Milvus">
+    Point etcd at `--data-dir /var/lib/etcd-restored`, then start Milvus normally.
+  </Step>
+</Steps>
+
+---
+
+## Bulk export and import
+
+For large-scale data migration or seeding from external files, Milvus supports bulk import.
+
+### Export data
+
+Use the Milvus Python SDK to export data to Parquet or JSON:
+
+```python
+from pymilvus import MilvusClient
+import pandas as pd
+
+client = MilvusClient(uri="http://localhost:19530", token="root:Milvus")
+
+# Query all entities (batch by primary key range for large collections)
+results = client.query(
+    collection_name="my_collection",
+    filter="",
+    output_fields=["id", "vector", "metadata"],
+    limit=10000
+)
+
+df = pd.DataFrame(results)
+df.to_parquet("my_collection_export.parquet", index=False)
+```
+
+### Bulk import
+
+<Steps>
+  <Step title="Upload data files to object storage">
+    ```bash
+    mc cp my_collection_export.parquet myminio/a-bucket/import/
+    ```
+  </Step>
+  <Step title="Start the import job">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530", token="root:Milvus")
+
+    job = client.bulk_import(
+        collection_name="my_collection",
+        files=[["import/my_collection_export.parquet"]]
+    )
+    print(job)  # {"jobId": "job-xxxxx"}
+    ```
+  </Step>
+  <Step title="Monitor import progress">
+    ```python
+    import time
+
+    while True:
+        state = client.get_bulk_import_state(task_id=job["jobId"])
+        print(state["state"], state["progress"])
+        if state["state"] in ("Completed", "Failed"):
+            break
+        time.sleep(5)
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Change Data Capture (CDC)
+
+Milvus CDC replicates data changes from a source Milvus instance to a target in near real-time. Use it for:
+
+- Active-passive disaster recovery
+- Geographic replication
+- Zero-downtime migration between clusters
+
+### Architecture
+
+```
+Source Milvus  →  CDC Server  →  Target Milvus
+    (primary)      (captures       (replica or
+                  DML changes)      new cluster)
+```
+
+### Quick setup
+
+<Steps>
+  <Step title="Deploy the CDC server">
+    ```yaml
+    # docker-compose.yml for CDC server
+    services:
+      milvus-cdc:
+        image: milvusdb/milvus-cdc:latest
+        ports:
+          - "8444:8444"
+        volumes:
+          - ./cdc-config.yaml:/app/configs/cdc.yaml
+    ```
+  </Step>
+  <Step title="Create a CDC task">
+    ```bash
+    curl -X POST http://localhost:8444/cdc \
+      -H "Content-Type: application/json" \
+      -d '{
+        "request_type": "create",
+        "request_data": {
+          "milvus_connect_param": {
+            "host": "source-milvus",
+            "port": 19530,
+            "username": "root",
+            "password": "Milvus"
+          },
+          "collection_infos": [
+            {"name": "*"}
+          ],
+          "sink_connect_param": {
+            "host": "target-milvus",
+            "port": 19530,
+            "username": "root",
+            "password": "Milvus"
+          }
+        }
+      }'
+    ```
+  </Step>
+  <Step title="Verify replication is running">
+    ```bash
+    curl http://localhost:8444/cdc -X POST \
+      -d '{"request_type": "list"}'
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Data migration between Milvus versions
+
+When upgrading Milvus across major versions, data migration may be required.
+
+<Steps>
+  <Step title="Back up the source cluster">
+    ```bash
+    ./milvus-backup create -n pre_upgrade_backup
+    ```
+  </Step>
+  <Step title="Deploy the new version of Milvus">
+    Start the new cluster. Do not import any data yet.
+  </Step>
+  <Step title="Restore the backup to the new cluster">
+    ```bash
+    # Point milvus-backup to the new cluster endpoint
+    ./milvus-backup restore -n pre_upgrade_backup
+    ```
+  </Step>
+  <Step title="Validate data integrity">
+    ```python
+    client = MilvusClient(uri="http://new-milvus:19530", token="root:Milvus")
+
+    # Check entity counts match the source
+    stats = client.get_collection_stats(collection_name="my_collection")
+    print(stats["row_count"])
+    ```
+  </Step>
+  <Step title="Switch traffic to the new cluster">
+    Update your application to point at the new cluster endpoint. Decommission the old cluster after verification.
+  </Step>
+</Steps>
+
+<Tip>
+Use CDC to minimize downtime during migration: start CDC replication from the old cluster to the new one, then cut over once the replica is caught up.
+</Tip>
+
+---
+
+## Backup schedule recommendations
+
+| Environment | etcd snapshot | milvus-backup | Retention |
+|---|---|---|---|
+| Production | Every hour | Daily full, hourly incremental | 30 days |
+| Staging | Daily | Weekly | 7 days |
+| Development | On demand | On demand | 3 days |
+
+<Note>
+Store backups in a separate object storage bucket or account from your Milvus data. A misconfiguration or accidental deletion of the primary bucket should not also destroy the backup.
+</Note>

@@ -1,0 +1,261 @@
+---
+title: "Insert Data"
+description: "Insert, upsert, and delete entities in Milvus collections. Understand flush behavior and data freshness semantics."
+---
+
+After creating a collection and loading it into memory, you can insert entities (rows) into it. Each entity is a dictionary that maps field names to values matching the collection schema.
+
+## Insert entities
+
+Use `client.insert()` to add a batch of entities to a collection.
+
+```python
+from pymilvus import MilvusClient
+
+client = MilvusClient("milvus_demo.db")
+
+data = [
+    {
+        "article_id": 1,
+        "title": "Introduction to Vector Databases",
+        "category": "technology",
+        "views": 4200,
+        "score": 4.8,
+        "published": True,
+        "embedding": [0.12, 0.34, ..., 0.56],  # 768-dim vector
+    },
+    {
+        "article_id": 2,
+        "title": "Understanding HNSW Indexing",
+        "category": "technology",
+        "views": 1850,
+        "score": 4.5,
+        "published": True,
+        "embedding": [0.78, 0.21, ..., 0.90],
+    },
+]
+
+result = client.insert(collection_name="articles", data=data)
+print(result)
+# {'insert_count': 2, 'ids': [1, 2]}
+```
+
+<ParamField body="collection_name" type="string" required>
+  Name of the target collection.
+</ParamField>
+
+<ParamField body="data" type="list[dict]" required>
+  A list of entity dictionaries. Each key must correspond to a field defined in the collection schema. For collections with `auto_id=True`, omit the primary key field.
+</ParamField>
+
+<ParamField body="partition_name" type="string">
+  Insert entities into a specific partition. Defaults to `_default`.
+</ParamField>
+
+### Insert into a partition
+
+```python
+result = client.insert(
+    collection_name="articles",
+    data=data,
+    partition_name="technology",
+)
+```
+
+### Insert with auto-ID
+
+When a collection is created with `auto_id=True`, Milvus generates the primary key for you. Do not include the primary key field in your data.
+
+```python
+data = [
+    {
+        "title": "Neural Networks Explained",
+        "embedding": [0.11, 0.22, ..., 0.33],
+    },
+]
+
+result = client.insert(collection_name="articles", data=data)
+print(result["ids"])
+# [448358928733200000]  # auto-generated ID
+```
+
+## Upsert entities
+
+Upsert performs an insert-or-update: if an entity with the given primary key exists, it is replaced; otherwise a new entity is inserted.
+
+```python
+updated_data = [
+    {
+        "article_id": 1,
+        "title": "Introduction to Vector Databases (Updated)",
+        "category": "technology",
+        "views": 5100,
+        "score": 4.9,
+        "published": True,
+        "embedding": [0.12, 0.35, ..., 0.57],
+    },
+]
+
+result = client.upsert(collection_name="articles", data=updated_data)
+print(result)
+# {'upsert_count': 1, 'ids': [1]}
+```
+
+<Note>
+  Upsert on a collection with `auto_id=True` is not supported. Use explicit primary keys when you need upsert semantics.
+</Note>
+
+## Delete entities
+
+### Delete by primary key
+
+```python
+result = client.delete(
+    collection_name="articles",
+    ids=[1, 2, 5],
+)
+print(result)
+# {'delete_count': 3}
+```
+
+### Delete by filter expression
+
+Delete all entities that match a boolean filter expression.
+
+```python
+result = client.delete(
+    collection_name="articles",
+    filter="category == 'sports' and views < 100",
+)
+```
+
+<Warning>
+  Delete by filter performs a scan over scalar indexes. For large datasets, prefer deleting by primary key for predictable latency.
+</Warning>
+
+## Bulk import
+
+For large datasets (millions of records), streaming inserts are inefficient. Use bulk import to load pre-formatted data files directly into object storage.
+
+```python
+from pymilvus import MilvusClient
+from pymilvus.bulk_writer import RemoteBulkWriter, BulkFileType
+
+# Write data files to object storage
+writer = RemoteBulkWriter(
+    schema=schema,
+    remote_path="/milvus/bulk",
+    connect_param=RemoteBulkWriter.ConnectParam(
+        endpoint="minio:9000",
+        access_key="minioadmin",
+        secret_key="minioadmin",
+        bucket_name="milvus-bucket",
+    ),
+    file_type=BulkFileType.PARQUET,
+)
+
+for record in large_dataset:
+    writer.append_row(record)
+
+writer.commit()
+files = writer.batch_files
+
+# Import the files into the collection
+job_id = client.bulk_import(
+    collection_name="articles",
+    files=files,
+)
+
+# Check import status
+import_progress = client.get_bulk_import_state(job_id=job_id)
+print(import_progress)
+```
+
+<Tip>
+  Parquet format provides the best import performance. Aim for files between 128 MB and 1 GB each to balance parallelism and overhead.
+</Tip>
+
+## Flush
+
+Milvus buffers newly inserted data in memory before writing it to persistent storage (object storage). Flushing forces this buffer to disk.
+
+### When flushing is needed
+
+- Before shutting down a standalone deployment
+- Before taking a snapshot or backup
+- When you need a guaranteed durable checkpoint
+
+### Manual flush
+
+```python
+client.flush(collection_name="articles")
+```
+
+Flush blocks until all buffered data is written to persistent storage and a new segment is sealed.
+
+### Auto-flush
+
+Milvus automatically flushes data when:
+
+- The in-memory write buffer reaches its configured size threshold
+- A configurable time interval elapses (default: 60 seconds)
+
+<Note>
+  You do not need to call `flush()` before running searches. Milvus makes streamed inserts searchable in near-real-time without an explicit flush.
+</Note>
+
+## Data freshness
+
+Milvus uses a streaming architecture that makes inserted data available for search within milliseconds, without waiting for a flush. This is called **near-real-time (NRT)** visibility.
+
+The sequence is:
+
+1. `client.insert()` writes to the WAL (write-ahead log).
+2. Data is routed to query nodes via message queues.
+3. Query nodes index the growing segment and make it immediately searchable.
+4. A background process eventually seals and flushes the segment to object storage.
+
+## Complete insert workflow
+
+```python
+from pymilvus import MilvusClient, DataType
+
+client = MilvusClient("milvus_demo.db")
+
+# 1. Create collection
+schema = client.create_schema(auto_id=False, enable_dynamic_field=True)
+schema.add_field("id",        DataType.INT64,         is_primary=True)
+schema.add_field("text",      DataType.VARCHAR,        max_length=2048)
+schema.add_field("category",  DataType.VARCHAR,        max_length=64)
+schema.add_field("embedding", DataType.FLOAT_VECTOR,   dim=768)
+
+index_params = client.prepare_index_params()
+index_params.add_index(
+    field_name="embedding",
+    index_type="HNSW",
+    metric_type="COSINE",
+    params={"M": 16, "efConstruction": 200},
+)
+
+client.create_collection(
+    collection_name="articles",
+    schema=schema,
+    index_params=index_params,
+)
+
+# 2. Insert data
+data = [
+    {"id": 1, "text": "Vector search at scale", "category": "tech",    "embedding": [...]},
+    {"id": 2, "text": "RAG with Milvus",        "category": "tutorial", "embedding": [...]},
+]
+
+result = client.insert(collection_name="articles", data=data)
+print(f"Inserted {result['insert_count']} entities")
+
+# 3. Data is immediately searchable — no flush required
+results = client.search(
+    collection_name="articles",
+    data=[[0.1, 0.2, ...]],  # query vector
+    limit=5,
+)
+```

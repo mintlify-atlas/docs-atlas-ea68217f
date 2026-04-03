@@ -1,0 +1,107 @@
+---
+title: "Insert"
+description: "Insert a batch of entities into a Milvus collection."
+---
+
+The `insert` method writes one or more entities into a collection. Each entity is represented as a dictionary mapping field names to values. After insertion, the primary keys of the inserted entities are returned.
+
+<Note>
+  Inserted data is buffered in memory and is **not immediately searchable**. It becomes available for search after an automatic or manual flush seals the open segment. For guaranteed durability before disconnecting, call `flush` explicitly.
+</Note>
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  The name of the target collection.
+</ParamField>
+
+<ParamField path="data" type="list[dict]" required>
+  A list of entities to insert. Each entity is a dictionary mapping field names to their values. The fields must match the collection schema.
+
+  <Expandable title="Entity structure">
+    Each dictionary in the list must contain a key-value pair for every non-auto-generated field defined in the schema. For example:
+
+    ```python
+    {
+        "id": 1,
+        "text": "Milvus is a vector database",
+        "vector": [0.1, 0.2, 0.3, ...]
+    }
+    ```
+
+    If the collection has `auto_id` enabled, omit the primary key field — Milvus generates it automatically.
+  </Expandable>
+</ParamField>
+
+<ParamField path="partition_name" type="string">
+  The name of the target partition within the collection. If omitted, entities are inserted into the default partition (`_default`).
+</ParamField>
+
+## Response
+
+<ResponseField name="insert_count" type="integer">
+  The number of entities successfully inserted.
+</ResponseField>
+
+<ResponseField name="ids" type="list[int] | list[str]">
+  The primary key values assigned to the inserted entities. The type matches the primary key field type defined in the schema (integer or string).
+</ResponseField>
+
+<ResponseField name="timestamp" type="integer">
+  The server-side hybrid logical timestamp at which the insert was acknowledged.
+</ResponseField>
+
+## Example
+
+<CodeGroup>
+
+```python Basic insert
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+# Prepare entities — each dict maps field names to values
+data = [
+    {"id": 1, "text": "Milvus is a vector database", "vector": [0.1, 0.2, 0.3, 0.4, 0.5]},
+    {"id": 2, "text": "It supports ANN search",        "vector": [0.5, 0.4, 0.3, 0.2, 0.1]},
+    {"id": 3, "text": "Hybrid search combines vectors","vector": [0.3, 0.3, 0.3, 0.3, 0.3]},
+]
+
+res = client.insert(
+    collection_name="my_collection",
+    data=data,
+)
+
+print(res)
+# {
+#   "insert_count": 3,
+#   "ids": [1, 2, 3]
+# }
+```
+
+```python Insert into a partition
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+data = [
+    {"id": 10, "category": "science", "vector": [0.1, 0.9, 0.4, 0.2, 0.6]},
+]
+
+res = client.insert(
+    collection_name="my_collection",
+    data=data,
+    partition_name="science_partition",
+)
+
+print(f"Inserted {res['insert_count']} entity with IDs: {res['ids']}")
+```
+
+</CodeGroup>
+
+## Notes
+
+- **Schema validation**: Every field value must be compatible with the declared field type and constraints (e.g., vector dimension, string max length).
+- **Auto-flush**: Milvus periodically flushes buffered segments to object storage. The flush interval is controlled by `dataCoord.segment.sealProportion` and `dataCoord.segment.maxSize`. Call `flush` manually if you need immediate durability.
+- **Insert size limit**: A single insert request is bounded by `quotaAndLimits.maxInsertSize` (default 64 MB). Split large batches into smaller requests if necessary.
+- **Concurrency**: Multiple insert requests can be sent concurrently. Milvus applies them atomically per request, but there is no cross-request transactional guarantee.

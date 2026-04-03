@@ -1,0 +1,171 @@
+---
+title: "Architecture"
+description: "How Milvus separates compute from storage, what each component does, and how the system scales and recovers from failure."
+---
+
+Milvus is a cloud-native, distributed vector database. Its architecture is designed around one core principle: **compute and storage are separated**. Each tier scales independently, so you can add query capacity without adding storage, and vice versa.
+
+## Separation of compute and storage
+
+All persistent data — binlog files, index files, and write-ahead log segments — lives in **object storage** (MinIO or S3-compatible). Compute components (nodes) are stateless: they load data from object storage on startup and write results back to object storage when done. This means:
+
+- Nodes can be replaced or restarted without data loss.
+- Index files built on one node can be reused by any other node.
+- Scaling out is as simple as adding nodes; no data migration is required.
+
+## Components
+
+Milvus has two categories of components: **coordinators** that manage metadata and scheduling, and **nodes** that execute work.
+
+```
+                   ┌─────────────────────────────────────┐
+                   │              Clients                 │
+                   └──────────────────┬──────────────────┘
+                                      │
+                   ┌──────────────────▼──────────────────┐
+                   │               Proxy                  │
+                   │   (routing, auth, SDK interface)     │
+                   └─────┬────────────┬──────────────────┘
+                         │            │
+          ┌──────────────▼──┐   ┌─────▼──────────────┐
+          │   Coordinators  │   │       Nodes         │
+          │                 │   │                     │
+          │  • rootcoord    │   │  • querynode        │
+          │  • datacoord    │   │  • datanode         │
+          │  • querycoord   │   │  • streamingnode    │
+          └────────┬────────┘   └─────────────────────┘
+                   │
+     ┌─────────────▼──────────────┐
+     │  etcd  │  Object Storage   │
+     │ (meta) │  (MinIO / S3)     │
+     └────────────────────────────┘
+```
+
+### Coordinators
+
+Coordinators are lightweight, metadata-focused services. They do not hold data themselves.
+
+<AccordionGroup>
+  <Accordion title="rootcoord — metadata and DDL">
+    The root coordinator owns all data definition operations: creating and dropping databases, collections, and partitions. It is the single source of truth for the collection schema and the global timestamp oracle. All schema changes go through rootcoord before being applied.
+  </Accordion>
+  <Accordion title="datacoord — segment management">
+    The data coordinator tracks the lifecycle of every segment: which segments are growing, which are sealed, and which have been flushed to object storage. It assigns segments to data nodes for ingestion and triggers compaction when small segments accumulate. It also manages index build requests by dispatching work to index nodes.
+  </Accordion>
+  <Accordion title="querycoord — query routing and load balancing">
+    The query coordinator manages which query nodes hold which segments in memory. It decides when to load a collection or partition, routes search and query requests to the correct nodes, and rebalances load when nodes are added or removed. It also handles replica management for high availability.
+  </Accordion>
+</AccordionGroup>
+
+### Nodes
+
+Nodes are the workers. They are horizontally scalable and stateless.
+
+<AccordionGroup>
+  <Accordion title="proxy — user-facing entry point">
+    Every SDK call enters Milvus through a proxy. The proxy validates requests, assigns timestamps, routes DDL requests to rootcoord, routes DML (insert/delete) requests to the WAL, and routes search requests to querycoord. Multiple proxies can run in parallel behind a load balancer.
+  </Accordion>
+  <Accordion title="querynode — vector index and search">
+    Query nodes hold vector indexes in memory and execute search and query requests. On startup (or after a failure), a query node loads segment index files from object storage. Index files are cached on disk for fast recovery — rebuilding from raw data is not required unless the index file is unavailable.
+
+    Query nodes are linked to the WAL stream, so they continuously receive new inserts and deletes and keep their in-memory state fresh.
+  </Accordion>
+  <Accordion title="datanode — WAL to binlog">
+    Data nodes consume the write-ahead log and transform incoming insert and delete operations into the binlog format. Binlogs are then written to object storage. Data nodes are stateless: if a data node restarts, it replays the WAL from its last checkpoint to reconstruct in-progress state.
+  </Accordion>
+  <Accordion title="streamingnode — WAL and streaming ingestion">
+    In cluster mode, streaming nodes manage the write-ahead log directly. They handle the producer-consumer pipeline from proxies to data nodes and query nodes, ensuring total ordering of operations within each hash bucket.
+  </Accordion>
+</AccordionGroup>
+
+## Write-ahead log (WAL)
+
+All insert and delete operations enter Milvus via the WAL before being applied to any component. The WAL provides:
+
+- **Durability** — operations are persisted before being acknowledged.
+- **Total ordering** — operations with the same primary key hash are always routed to the same WAL bucket and processed in order.
+- **Fan-out** — both query nodes (which maintain in-memory indexes) and data nodes (which write binlogs) consume the same WAL stream independently.
+
+Each log entry carries a timestamp. Binlog records, in-memory index cells, and table rows all retain this timestamp, enabling consistent point-in-time snapshots across all data forms.
+
+## Metadata and service discovery
+
+**etcd** stores all system metadata:
+
+- Collection schemas and IDs
+- Segment assignment tables
+- Node registration and health status
+- Configuration values
+
+All coordinators use etcd as a distributed coordination layer. If a coordinator restarts, it recovers its state entirely from etcd.
+
+## Object storage
+
+All durable data persists in object storage (MinIO by default; S3 or GCS in production):
+
+- **Binlog files** — raw insert/delete records written by data nodes
+- **Index files** — built vector indexes written by index nodes and loaded by query nodes
+- **WAL segments** — retained for recovery
+
+Because all data is in object storage, no data is lost when any node fails.
+
+## Standalone vs. cluster mode
+
+<Tabs>
+  <Tab title="Standalone">
+    All components — coordinators, nodes, etcd, and MinIO — run inside a single process or a single Docker container. Suitable for development, testing, and small-scale production workloads.
+
+    ```bash
+    # Start standalone with Docker
+    docker run -d --name milvus-standalone \
+      -p 19530:19530 \
+      milvusdb/milvus:latest standalone
+    ```
+
+    | Property | Value |
+    |---|---|
+    | Deployment | Single process or container |
+    | Scaling | Vertical only |
+    | Failure recovery | Process restart recovers from WAL |
+    | Recommended for | Dev, testing, under 10M vectors |
+
+  </Tab>
+  <Tab title="Cluster">
+    Each component runs as a separate, horizontally scalable service on Kubernetes. Coordinators and nodes scale independently.
+
+    ```bash
+    # Install with Helm
+    helm repo add milvus https://zilliztech.github.io/milvus-helm/
+    helm install milvus milvus/milvus --set cluster.enabled=true
+    ```
+
+    | Property | Value |
+    |---|---|
+    | Deployment | Kubernetes (one pod per component type) |
+    | Scaling | Horizontal — add nodes independently |
+    | Failure recovery | Stateless nodes recover from object storage |
+    | Recommended for | Production, >10M vectors, high QPS |
+
+  </Tab>
+</Tabs>
+
+## Failure recovery
+
+Because all nodes are stateless and all data is in object storage, Milvus recovers quickly from most failure scenarios:
+
+- **Query node failure** — querycoord detects the failure via etcd. Other query nodes load the failed node's index files from object storage (or use replicas already in memory).
+- **Data node failure** — a replacement node replays the WAL from the last checkpoint to reconstruct in-progress binlog writes.
+- **Coordinator failure** — the coordinator restarts and reloads its state from etcd. No manual intervention is required.
+
+<Tip>
+Enable multiple replicas (`replicaNumber > 1`) in production so that a query node failure does not cause any segment to become temporarily unavailable.
+</Tip>
+
+<CardGroup cols={2}>
+  <Card title="Data model" icon="database" href="/concepts/data-model">
+    Understand collections, partitions, and segments before deploying.
+  </Card>
+  <Card title="Install cluster" icon="server" href="/install-cluster">
+    Deploy Milvus on Kubernetes with Helm.
+  </Card>
+</CardGroup>

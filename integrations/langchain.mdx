@@ -1,0 +1,243 @@
+---
+title: "LangChain integration"
+description: "Use Milvus as a vector store in LangChain chains, agents, and RAG pipelines."
+---
+
+[LangChain](https://python.langchain.com/) is a framework for building LLM applications. The `langchain-milvus` package provides a `Milvus` class that implements the LangChain `VectorStore` interface, letting you use Milvus for document storage and similarity retrieval inside any LangChain pipeline.
+
+## Installation
+
+```bash
+pip install langchain-milvus langchain-openai
+```
+
+<Note>
+  `langchain-openai` is used in the examples below for embeddings. Replace it with any LangChain-compatible embedding package for your preferred provider.
+</Note>
+
+## Connect to Milvus
+
+Choose a connection target based on your deployment:
+
+<Tabs>
+  <Tab title="Milvus Lite">
+    Milvus Lite runs in-process and stores data in a local file. No server setup required — ideal for prototyping and notebooks.
+
+    ```python
+    from langchain_milvus import Milvus
+    from langchain_openai import OpenAIEmbeddings
+
+    vectorstore = Milvus(
+        embedding_function=OpenAIEmbeddings(),
+        connection_args={"uri": "milvus_demo.db"},
+        collection_name="langchain_demo",
+        drop_old=True,
+    )
+    ```
+  </Tab>
+  <Tab title="Milvus Standalone">
+    Connect to a running Milvus instance by specifying the host and port.
+
+    ```python
+    from langchain_milvus import Milvus
+    from langchain_openai import OpenAIEmbeddings
+
+    vectorstore = Milvus(
+        embedding_function=OpenAIEmbeddings(),
+        connection_args={"host": "localhost", "port": "19530"},
+        collection_name="langchain_demo",
+        drop_old=True,
+    )
+    ```
+  </Tab>
+  <Tab title="Zilliz Cloud">
+    Connect to a fully managed Milvus cluster on [Zilliz Cloud](https://zilliz.com/cloud) using your cluster URI and API key.
+
+    ```python
+    from langchain_milvus import Milvus
+    from langchain_openai import OpenAIEmbeddings
+
+    vectorstore = Milvus(
+        embedding_function=OpenAIEmbeddings(),
+        connection_args={
+            "uri": "https://YOUR_CLUSTER_ID.api.gcp-us-west1.zillizcloud.com",
+            "token": "YOUR_API_KEY",
+        },
+        collection_name="langchain_demo",
+        drop_old=True,
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Basic usage
+
+<Steps>
+  <Step title="Initialize the vector store">
+    Create a `Milvus` instance with an embedding function and connection arguments. Set `drop_old=True` to start with a clean collection during development.
+
+    ```python
+    from langchain_milvus import Milvus
+    from langchain_openai import OpenAIEmbeddings
+
+    vectorstore = Milvus(
+        embedding_function=OpenAIEmbeddings(),
+        connection_args={"uri": "milvus_demo.db"},
+        collection_name="langchain_demo",
+        drop_old=True,
+    )
+    ```
+  </Step>
+  <Step title="Add documents">
+    Add plain text strings with `add_texts`, or pass `Document` objects with metadata using `add_documents` (or the class method `from_documents`).
+
+    ```python
+    from langchain_core.documents import Document
+
+    # Add plain strings
+    vectorstore.add_texts(
+        ["Milvus is a vector database", "LangChain builds LLM apps"]
+    )
+
+    # Add Document objects with metadata
+    docs = [
+        Document(page_content="Dense vector search", metadata={"topic": "search"}),
+        Document(page_content="Sparse BM25 retrieval", metadata={"topic": "search"}),
+    ]
+    vectorstore.add_documents(docs)
+    ```
+  </Step>
+  <Step title="Search for similar documents">
+    Call `similarity_search` to retrieve the top-k most relevant documents for a query string.
+
+    ```python
+    results = vectorstore.similarity_search("vector database", k=2)
+    for doc in results:
+        print(doc.page_content)
+    ```
+
+    To get relevance scores alongside the results, use `similarity_search_with_score`:
+
+    ```python
+    results_with_scores = vectorstore.similarity_search_with_score("vector database", k=2)
+    for doc, score in results_with_scores:
+        print(f"{score:.4f}  {doc.page_content}")
+    ```
+  </Step>
+  <Step title="Use as a retriever">
+    Call `as_retriever` to wrap the vector store in a LangChain `Retriever`. This makes it compatible with LangChain expression language (LCEL) chains.
+
+    ```python
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+    ```
+  </Step>
+</Steps>
+
+## Use in a RAG chain
+
+Combine the Milvus retriever with an LLM to build a retrieval-augmented generation pipeline.
+
+<CodeGroup>
+
+```python Using create_retrieval_chain
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+prompt = ChatPromptTemplate.from_template("""
+Answer the question using only the context provided.
+
+Context: {context}
+
+Question: {input}
+""")
+
+retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+document_chain = create_stuff_documents_chain(llm, prompt)
+rag_chain = create_retrieval_chain(retriever, document_chain)
+
+response = rag_chain.invoke({"input": "What is Milvus?"})
+print(response["answer"])
+```
+
+```python Using LCEL pipe
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(model="gpt-4o-mini")
+retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+
+prompt = ChatPromptTemplate.from_template("""
+Answer the question using only the context provided.
+
+Context: {context}
+
+Question: {question}
+""")
+
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+rag_chain = (
+    {"context": retriever | format_docs, "question": RunnablePassthrough()}
+    | prompt
+    | llm
+    | StrOutputParser()
+)
+
+print(rag_chain.invoke("What is Milvus?"))
+```
+
+</CodeGroup>
+
+## Metadata filtering
+
+Pass a `expr` filter expression to limit search results to documents matching specific metadata conditions. Milvus filter expressions use the same syntax as the [scalar filtering expressions](https://milvus.io/docs/boolean.md) in the Milvus query language.
+
+```python
+# Only retrieve documents where topic is "search"
+results = vectorstore.similarity_search(
+    "retrieval methods",
+    k=3,
+    expr='topic == "search"',
+)
+
+# Numeric comparison
+results = vectorstore.similarity_search(
+    "neural embeddings",
+    k=5,
+    expr="year >= 2023",
+)
+```
+
+<Tip>
+  You must create the collection with metadata fields defined as Milvus schema fields before filtering on them. When using `langchain-milvus`, metadata fields are stored as dynamic fields by default and can be filtered without explicit schema definition.
+</Tip>
+
+## Complete example
+
+```python
+from langchain_milvus import Milvus
+from langchain_openai import OpenAIEmbeddings
+
+# 1. Initialize
+vectorstore = Milvus(
+    embedding_function=OpenAIEmbeddings(),
+    connection_args={"uri": "milvus_demo.db"},
+    collection_name="langchain_demo",
+    drop_old=True,
+)
+
+# 2. Add documents
+vectorstore.add_texts(["Milvus is a vector database", "LangChain builds LLM apps"])
+
+# 3. Search
+results = vectorstore.similarity_search("vector database", k=2)
+for doc in results:
+    print(doc.page_content)
+```

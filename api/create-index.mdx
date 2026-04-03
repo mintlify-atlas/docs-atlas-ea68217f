@@ -1,0 +1,275 @@
+---
+title: "Create Index"
+description: "Builds an index on a vector or scalar field to enable efficient similarity search and filtering."
+---
+
+Builds an index on a specified field within a collection. Indexing is required before you can load the collection and perform vector searches. Index building is asynchronous — the call returns immediately and the build runs in the background.
+
+You can create multiple indexes on the same collection (for example, one on a dense vector field, one on a sparse vector field, and one on a scalar field for filtering).
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  Name of the collection that contains the field to index.
+</ParamField>
+
+<ParamField path="field_name" type="string" required>
+  Name of the field to build the index on. Must be a valid field in the collection schema.
+</ParamField>
+
+<ParamField path="index_params" type="IndexParams or dict" required>
+  Index configuration. Use `MilvusClient.prepare_index_params()` to construct an `IndexParams` object, or pass a dict directly.
+
+  <Expandable title="index_params properties">
+    <ParamField path="metric_type" type="string">
+      Distance metric for vector similarity. The supported values depend on the vector type:
+
+      - Float vectors (`FLOAT_VECTOR`): `L2`, `IP`, `COSINE`
+      - Binary vectors (`BINARY_VECTOR`): `HAMMING`, `JACCARD`
+      - Sparse vectors (`SPARSE_FLOAT_VECTOR`): `IP`
+
+      Not required for scalar field indexes.
+    </ParamField>
+
+    <ParamField path="index_type" type="string">
+      Algorithm used to build the index. See the [Index types](#index-types) section below for supported values and their parameters.
+    </ParamField>
+
+    <ParamField path="params" type="dict">
+      Index-specific build parameters. The accepted keys vary by `index_type`. See [Index types](#index-types) below.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="index_name" type="string">
+  Optional custom name for the index. When omitted, Milvus generates a name automatically. You can create multiple indexes on different fields in the same collection; use distinct names to identify them.
+</ParamField>
+
+## Index types
+
+<AccordionGroup>
+  <Accordion title="HNSW — Hierarchical Navigable Small World">
+    A graph-based index offering high recall and fast query speeds. Best for datasets that fit in memory.
+
+    Supported field types: `FLOAT_VECTOR`
+
+    | Parameter | Type | Range | Default | Description |
+    |---|---|---|---|---|
+    | `M` | int | 4 – 64 | 16 | Number of bi-directional links per node in the graph. Higher values improve recall at the cost of build time and memory. |
+    | `efConstruction` | int | 8 – 512 | 64 | Candidate pool size during index build. Higher values increase recall and build time. |
+  </Accordion>
+
+  <Accordion title="IVF_FLAT — Inverted File (flat quantization)">
+    Partitions the vector space into clusters. Query time is proportional to the number of clusters searched. Good baseline for medium-to-large datasets.
+
+    Supported field types: `FLOAT_VECTOR`
+
+    | Parameter | Type | Range | Default | Description |
+    |---|---|---|---|---|
+    | `nlist` | int | 1 – 65536 | — | Number of cluster centroids. Recommended starting value: `4 × sqrt(n)` where `n` is the number of vectors. |
+  </Accordion>
+
+  <Accordion title="IVF_SQ8 — Inverted File (scalar quantization)">
+    Like `IVF_FLAT` but compresses each vector to 8-bit integers. Reduces memory footprint by ~75% with a small accuracy trade-off.
+
+    Supported field types: `FLOAT_VECTOR`
+
+    | Parameter | Type | Range | Default | Description |
+    |---|---|---|---|---|
+    | `nlist` | int | 1 – 65536 | — | Number of cluster centroids. |
+  </Accordion>
+
+  <Accordion title="IVF_PQ — Inverted File (product quantization)">
+    Combines inverted file clustering with product quantization for the highest compression ratio. Suitable for very large datasets where memory is constrained.
+
+    Supported field types: `FLOAT_VECTOR`
+
+    | Parameter | Type | Range | Default | Description |
+    |---|---|---|---|---|
+    | `nlist` | int | 1 – 65536 | — | Number of cluster centroids. |
+    | `m` | int | Must divide evenly into the vector dimension | — | Number of sub-quantizers (sub-spaces). Higher values reduce compression but improve accuracy. |
+    | `nbits` | int | 1 – 16 | 8 | Number of bits per sub-quantizer code. Controls compression vs. accuracy trade-off. |
+  </Accordion>
+
+  <Accordion title="FLAT — Brute-force search">
+    Performs an exhaustive scan of all vectors. Guarantees 100% recall but does not scale to large datasets.
+
+    Supported field types: `FLOAT_VECTOR`
+
+    No build parameters required.
+  </Accordion>
+
+  <Accordion title="DISKANN — Disk-based ANN">
+    Graph-based index that stores data on disk, enabling searches over datasets too large to fit in memory.
+
+    Supported field types: `FLOAT_VECTOR`
+
+    | Parameter | Type | Description |
+    |---|---|---|
+    | `search_list_size` | int | Size of the candidate list during graph traversal at query time. Larger values improve recall but increase latency. |
+  </Accordion>
+
+  <Accordion title="SCANN — Scalable Approximate Nearest Neighbors">
+    Uses product quantization with a tree-based quantizer for high throughput. Optimized for CPU-bound workloads.
+
+    Supported field types: `FLOAT_VECTOR`
+
+    No required build parameters.
+  </Accordion>
+
+  <Accordion title="GPU_CAGRA — GPU-accelerated graph index">
+    GPU-native graph index for high-throughput search on NVIDIA hardware.
+
+    Supported field types: `FLOAT_VECTOR`
+
+    Requires a Milvus deployment with GPU support enabled.
+  </Accordion>
+
+  <Accordion title="BIN_FLAT / BIN_IVF_FLAT — Binary vector indexes">
+    Flat and IVF variants optimized for binary vectors.
+
+    Supported field types: `BINARY_VECTOR`
+
+    `BIN_FLAT`: No build parameters required.
+
+    `BIN_IVF_FLAT`:
+
+    | Parameter | Type | Range | Description |
+    |---|---|---|---|
+    | `nlist` | int | 1 – 65536 | Number of cluster centroids. |
+  </Accordion>
+
+  <Accordion title="SPARSE_INVERTED_INDEX / SPARSE_WAND — Sparse vector indexes">
+    Inverted index structures for sparse vectors. `SPARSE_WAND` uses the WAND (Weak AND) algorithm to skip low-scoring candidates and improve query throughput.
+
+    Supported field types: `SPARSE_FLOAT_VECTOR`
+
+    No required build parameters.
+  </Accordion>
+
+  <Accordion title="AUTOINDEX — Automatic index selection">
+    Milvus chooses the index type and parameters automatically based on the field type and data distribution. Recommended when you want good out-of-the-box performance without manual tuning.
+
+    Supported field types: all vector types and scalar fields.
+
+    No build parameters required.
+  </Accordion>
+</AccordionGroup>
+
+## Examples
+
+<CodeGroup>
+
+```python HNSW index on a float vector field
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+index_params = client.prepare_index_params()
+
+index_params.add_index(
+    field_name="embedding",
+    index_name="embedding_hnsw_idx",
+    index_type="HNSW",
+    metric_type="COSINE",
+    params={
+        "M": 16,
+        "efConstruction": 64,
+    },
+)
+
+client.create_index(
+    collection_name="articles",
+    index_params=index_params,
+)
+```
+
+```python IVF_PQ index on a float vector field
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+index_params = client.prepare_index_params()
+
+index_params.add_index(
+    field_name="dense_vector",
+    index_name="dense_ivfpq_idx",
+    index_type="IVF_PQ",
+    metric_type="L2",
+    params={
+        "nlist": 1024,
+        "m": 16,       # vector dim must be divisible by m
+        "nbits": 8,
+    },
+)
+
+client.create_index(
+    collection_name="my_collection",
+    index_params=index_params,
+)
+```
+
+```python Multiple indexes on one collection
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+index_params = client.prepare_index_params()
+
+# Dense vector field — HNSW
+index_params.add_index(
+    field_name="dense_vector",
+    index_name="dense_idx",
+    index_type="HNSW",
+    metric_type="IP",
+    params={"M": 16, "efConstruction": 64},
+)
+
+# Sparse vector field — inverted index
+index_params.add_index(
+    field_name="sparse_vector",
+    index_name="sparse_idx",
+    index_type="SPARSE_INVERTED_INDEX",
+    metric_type="IP",
+)
+
+# Scalar field — for filtering
+index_params.add_index(
+    field_name="category",
+    index_name="category_scalar_idx",
+    index_type="AUTOINDEX",
+)
+
+client.create_index(
+    collection_name="hybrid_collection",
+    index_params=index_params,
+)
+```
+
+</CodeGroup>
+
+## Checking build progress
+
+Index building runs asynchronously. Use `get_index_building_progress` to poll status, or pass `sync=True` (where supported) to block until the build completes.
+
+```python
+# Poll index build progress
+progress = client.get_index_building_progress(
+    collection_name="articles",
+    index_name="embedding_hnsw_idx",
+)
+print(progress)
+# {'total_rows': 10000, 'indexed_rows': 8500, 'pending_index_rows': 1500}
+```
+
+<Note>
+  You must call `create_index` before loading a collection. Attempting to load a collection without a vector index raises an error.
+</Note>
+
+<Tip>
+  For most use cases, start with `HNSW` (`M=16`, `efConstruction=64`) and `AUTOINDEX` for scalar fields. Profile your workload before switching to a more complex index like `IVF_PQ` or `DISKANN`.
+</Tip>
+
+<Warning>
+  If you rebuild an index on a field that already has one, Milvus will drop the existing index first. Release the collection before re-indexing if it is currently loaded.
+</Warning>

@@ -1,0 +1,217 @@
+---
+title: "Full-text Search"
+description: "Use BM25-based full-text search on VARCHAR fields in Milvus. Configure analyzers, define BM25 functions, and combine with vector search for hybrid retrieval."
+---
+
+Full-text search in Milvus uses the BM25 ranking algorithm to match text queries against VARCHAR fields. Milvus handles tokenization, term frequency analysis, and sparse vector generation internally, so you query with plain text strings rather than pre-computed vectors.
+
+## How it works
+
+<Steps>
+  <Step title="Define an analyzer on a VARCHAR field">
+    An analyzer tokenizes text into terms when data is inserted. Milvus supports several built-in tokenizers and custom analyzer configurations.
+  </Step>
+  <Step title="Define a BM25 function">
+    A BM25 function maps the analyzed VARCHAR field to a `SPARSE_FLOAT_VECTOR` field, storing term frequency information as a sparse vector.
+  </Step>
+  <Step title="Search with text strings">
+    At search time, pass a plain text query. Milvus tokenizes it with the same analyzer, converts it to a sparse vector, and runs an inner-product search against the BM25 sparse vectors.
+  </Step>
+</Steps>
+
+## Collection setup
+
+### 1. Add a VARCHAR field with an analyzer
+
+```python
+from pymilvus import MilvusClient, DataType
+
+client = MilvusClient("milvus_demo.db")
+
+schema = client.create_schema(auto_id=True, enable_dynamic_field=False)
+
+schema.add_field("id",   DataType.INT64,  is_primary=True)
+
+# The source text field — must have enable_analyzer=True
+schema.add_field(
+    field_name="text",
+    datatype=DataType.VARCHAR,
+    max_length=4096,
+    enable_analyzer=True,
+    analyzer_params={"type": "english"},   # built-in English tokenizer
+)
+
+# Sparse vector field — populated automatically by the BM25 function
+schema.add_field(
+    field_name="text_sparse",
+    datatype=DataType.SPARSE_FLOAT_VECTOR,
+)
+```
+
+### 2. Define the BM25 function
+
+```python
+from pymilvus import Function, FunctionType
+
+bm25_fn = Function(
+    name="bm25",
+    function_type=FunctionType.BM25,
+    input_field_names=["text"],          # source VARCHAR field
+    output_field_names=["text_sparse"],  # target sparse vector field
+)
+
+schema.add_function(bm25_fn)
+```
+
+### 3. Add an index on the sparse vector field
+
+```python
+index_params = client.prepare_index_params()
+
+index_params.add_index(
+    field_name="text_sparse",
+    index_type="SPARSE_INVERTED_INDEX",
+    metric_type="BM25",
+)
+
+client.create_collection(
+    collection_name="articles",
+    schema=schema,
+    index_params=index_params,
+)
+```
+
+## Insert data
+
+Insert entities with the `text` field populated. Milvus automatically generates `text_sparse` from the BM25 function — do not provide it manually.
+
+```python
+data = [
+    {"text": "Milvus is an open-source vector database built for AI applications."},
+    {"text": "HNSW is a graph-based approximate nearest neighbor index."},
+    {"text": "BM25 is a widely used term-based relevance ranking function."},
+    {"text": "Hybrid search combines dense and sparse retrieval for better recall."},
+]
+
+client.insert(collection_name="articles", data=data)
+```
+
+## Full-text search
+
+Pass a plain text string as the query. Milvus applies the same analyzer and returns results ranked by BM25 relevance score.
+
+```python
+results = client.search(
+    collection_name="articles",
+    data=["vector database for AI"],    # plain text query string
+    anns_field="text_sparse",           # must be the BM25 sparse field
+    limit=5,
+    output_fields=["text"],
+    search_params={"metric_type": "BM25"},
+)
+
+for hits in results:
+    for hit in hits:
+        print(f"score={hit['distance']:.4f}  text={hit['entity']['text']}")
+```
+
+## Analyzer options
+
+The `analyzer_params` dictionary on the VARCHAR field controls tokenization behavior.
+
+<Tabs>
+  <Tab title="Built-in analyzers">
+    Milvus ships with pre-configured analyzers for common languages.
+
+    ```python
+    # English: lowercases, removes stop words, applies stemming
+    analyzer_params={"type": "english"}
+
+    # Chinese: uses a CJK-aware segmenter
+    analyzer_params={"type": "chinese"}
+
+    # Standard: lowercases and splits on whitespace/punctuation, no stemming
+    analyzer_params={"type": "standard"}
+    ```
+  </Tab>
+  <Tab title="Custom analyzer">
+    Build a custom analyzer by specifying a tokenizer and a list of filters.
+
+    ```python
+    analyzer_params={
+        "tokenizer": "whitespace",   # split on whitespace only
+        "filter": [
+            "lowercase",             # convert to lowercase
+            {
+                "type": "stop",
+                "stop_words": ["the", "a", "an", "is", "in", "on", "at"],
+            },
+        ],
+    }
+    ```
+
+    **Available tokenizers**: `standard`, `whitespace`, `jieba` (Chinese)
+
+    **Available filters**: `lowercase`, `stop`, `stemmer`, `length`, `ascii_folding`
+  </Tab>
+</Tabs>
+
+## Combine full-text search with vector search
+
+Full-text search integrates naturally with hybrid search. Use `AnnSearchRequest` to submit both a dense ANN search and a BM25 text search, then rerank with RRF.
+
+```python
+from pymilvus import AnnSearchRequest, RRFRanker
+
+# Dense semantic query
+dense_req = AnnSearchRequest(
+    data=[embed_model.encode("vector database concepts")],
+    anns_field="dense_vector",
+    param={"metric_type": "COSINE", "params": {"ef": 100}},
+    limit=20,
+)
+
+# BM25 keyword query
+sparse_req = AnnSearchRequest(
+    data=["vector database concepts"],   # plain text — Milvus tokenizes it
+    anns_field="text_sparse",
+    param={"metric_type": "BM25"},
+    limit=20,
+)
+
+results = client.hybrid_search(
+    collection_name="articles",
+    reqs=[dense_req, sparse_req],
+    ranker=RRFRanker(k=60),
+    limit=5,
+    output_fields=["text"],
+)
+```
+
+<Tip>
+  This pattern — dense embedding search + BM25 full-text search + RRF reranking — is a standard high-recall retrieval pipeline for RAG applications. Dense search retrieves semantically similar passages; BM25 ensures that documents with exact keyword matches are not missed.
+</Tip>
+
+## BM25 parameters
+
+BM25 scores are controlled by two parameters, `k1` and `b`. In Milvus these are configured at the collection level and apply globally to the BM25 function.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `k1` | 1.2 | Term frequency saturation. Higher values reward repeated terms more. |
+| `b` | 0.75 | Document length normalization. `0` = no normalization; `1` = full normalization. |
+
+```python
+# Set BM25 parameters via collection properties
+client.alter_collection_properties(
+    collection_name="articles",
+    properties={
+        "milvus.bm25.k1": 1.5,
+        "milvus.bm25.b": 0.8,
+    },
+)
+```
+
+<Note>
+  BM25 parameter changes take effect on newly ingested data. Existing sparse vectors are not retroactively recomputed.
+</Note>

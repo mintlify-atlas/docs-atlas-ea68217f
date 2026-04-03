@@ -1,0 +1,275 @@
+---
+title: "Monitoring"
+description: "Scrape Prometheus metrics, visualize them in Grafana, check health endpoints, configure logging, and trace requests through Milvus."
+---
+
+Milvus exposes metrics, health endpoints, and structured logs to give you visibility into system performance and correctness.
+
+---
+
+## Prometheus metrics
+
+Every Milvus component exposes metrics at:
+
+```
+http://<host>:9091/metrics
+```
+
+Prometheus should be configured to scrape this endpoint. A minimal scrape config:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: milvus
+    static_configs:
+      - targets:
+          - "milvus-proxy:9091"
+          - "milvus-rootcoord:9091"
+          - "milvus-datacoord:9091"
+          - "milvus-querycoord:9091"
+          - "milvus-datanode:9091"
+          - "milvus-querynode:9091"
+    metrics_path: /metrics
+    scrape_interval: 15s
+```
+
+<Tip>
+In Kubernetes, use a `ServiceMonitor` (Prometheus Operator) or a pod-annotation-based scrape config to auto-discover Milvus pods instead of hardcoding targets.
+</Tip>
+
+---
+
+## Health check endpoint
+
+Use the health endpoint to check whether Milvus is ready to serve traffic:
+
+```bash
+curl http://localhost:9091/healthz
+# OK
+```
+
+An HTTP 200 with body `OK` means all required components are healthy. Any other response indicates a problem.
+
+This endpoint is safe to use as a Kubernetes readiness or liveness probe:
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: 9091
+  initialDelaySeconds: 30
+  periodSeconds: 10
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 9091
+  initialDelaySeconds: 60
+  periodSeconds: 20
+```
+
+---
+
+## Grafana dashboard
+
+Milvus ships a pre-built Grafana dashboard at `deployments/monitor/grafana/milvus-dashboard.json`.
+
+<Steps>
+  <Step title="Import the dashboard into Grafana">
+    In Grafana, go to **Dashboards → Import**, then upload `milvus-dashboard.json` or paste its contents.
+  </Step>
+  <Step title="Set the Prometheus data source">
+    When prompted, select your Prometheus data source. The dashboard uses the `$instance`, `$app_name`, and `$namespace` variables to filter by deployment.
+  </Step>
+  <Step title="Configure dashboard variables">
+    Set the template variables at the top of the dashboard to match your Milvus instance name and Kubernetes namespace.
+  </Step>
+</Steps>
+
+---
+
+## Key metrics to monitor
+
+<AccordionGroup>
+  <Accordion title="Proxy metrics">
+    | Metric | Description |
+    |---|---|
+    | `milvus_proxy_sq_latency` | Search and query request latency (histogram). Watch p99. |
+    | `milvus_proxy_mutation_latency` | Insert and delete request latency. |
+    | `milvus_proxy_search_vectors_count` | Cumulative vectors searched — rate shows search throughput. |
+    | `milvus_proxy_insert_vectors_count` | Cumulative vectors inserted — rate shows ingest throughput. |
+    | `milvus_proxy_cache_hit_count` | Cache hit/miss counts for collection metadata lookups. |
+    | `milvus_proxy_dql_req_count` | DQL request count by status (success / fail). |
+    | `milvus_proxy_dml_req_count` | DML request count by status. |
+  </Accordion>
+
+  <Accordion title="Query node metrics">
+    | Metric | Description |
+    |---|---|
+    | `milvus_querynode_sq_req_latency` | Per-node search and query latency. |
+    | `milvus_querynode_sq_queue_latency` | Time requests spend waiting in the query queue. |
+    | `milvus_querynode_segment_num` | Number of segments loaded on each query node. |
+    | `milvus_querynode_entity_num` | Number of queryable entities per node. |
+    | `milvus_querynode_estimate_cpu_usage` | Estimated CPU usage (100 = 1 vCPU). |
+    | `milvus_querynode_read_evicted_count` | Read requests evicted due to rate limiting. |
+  </Accordion>
+
+  <Accordion title="Data coordinator metrics">
+    | Metric | Description |
+    |---|---|
+    | `milvus_datacoord_segment_num` | Segment count by state: growing, sealed, flushed, dropped. |
+    | `milvus_datacoord_stored_rows_num` | Total valid flushed rows across all collections. |
+    | `milvus_datacoord_stored_rows_count` | Rate of rows flushed to object storage. |
+    | `milvus_datacoord_collection_num` | Total collection count. |
+  </Accordion>
+
+  <Accordion title="Root coordinator metrics">
+    | Metric | Description |
+    |---|---|
+    | `milvus_rootcoord_collection_num` | Total collections. |
+    | `milvus_rootcoord_partition_num` | Total partitions. |
+    | `milvus_rootcoord_ddl_req_count` | DDL request count (CreateCollection, DropCollection, etc.). |
+    | `milvus_rootcoord_ddl_req_latency` | DDL request latency. |
+  </Accordion>
+</AccordionGroup>
+
+### Example PromQL queries
+
+```promql
+# p99 search latency across all proxies (milliseconds)
+histogram_quantile(0.99,
+  sum by (le) (
+    rate(milvus_proxy_sq_latency_bucket[2m])
+  )
+)
+
+# Insert throughput in MB/s
+sum(rate(milvus_proxy_receive_bytes_count[2m])) / 1048576
+
+# Cache hit rate
+sum(rate(milvus_proxy_cache_hit_count{cache_state="hit"}[2m]))
+/
+sum(rate(milvus_proxy_cache_hit_count[2m]))
+
+# Segment count by state
+sum(milvus_datacoord_segment_num) by (segment_state)
+```
+
+---
+
+## Logging
+
+Configure logging in `milvus.yaml`:
+
+```yaml
+log:
+  level: info        # trace | debug | info | warn | error | fatal
+  format: json       # json is preferred for log aggregation pipelines
+  stdout: true
+  file:
+    rootPath: /var/log/milvus   # Empty = stdout only
+    maxSize: 300                # Max file size in MB
+    maxAge: 10                  # Days to retain rotated logs
+    maxBackups: 20
+```
+
+<Tabs>
+  <Tab title="Structured JSON logs">
+    Set `log.format: json` and ship to a log aggregator (Loki, Elasticsearch, Splunk):
+
+    ```json
+    {"level":"info","ts":"2024-01-15T10:23:45.123Z","caller":"proxy/task.go:234","msg":"search request completed","collection":"my_collection","latency_ms":12,"nq":10}
+    ```
+  </Tab>
+  <Tab title="Access logs">
+    Enable per-request access logging for auditing:
+
+    ```yaml
+    proxy:
+      accessLog:
+        enable: true
+        filename: access.log
+        localPath: /var/log/milvus
+        maxSize: 64   # MB
+        formatters:
+          base:
+            format: "[$time_now] [ACCESS] <$user_name: $user_addr> $method_name [status: $method_status] [traceID: $trace_id] [timeCost: $time_cost]"
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Distributed tracing
+
+Milvus supports OpenTelemetry-compatible tracing. Configure the exporter in `milvus.yaml`:
+
+<Tabs>
+  <Tab title="Jaeger">
+    ```yaml
+    trace:
+      exporter: jaeger
+      sampleFraction: 0.1   # Sample 10% of requests; use 1 to sample all
+      jaeger:
+        url: http://jaeger:14268/api/traces
+    ```
+  </Tab>
+  <Tab title="OTLP (OpenTelemetry Collector)">
+    ```yaml
+    trace:
+      exporter: otlp
+      sampleFraction: 0.1
+      otlp:
+        endpoint: otel-collector:4317   # gRPC endpoint
+        method: grpc
+        secure: false
+    ```
+  </Tab>
+  <Tab title="Disabled (default)">
+    ```yaml
+    trace:
+      exporter: noop
+      sampleFraction: 0
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+Set `sampleFraction: 1` only in development — full sampling adds measurable overhead at high request rates. Use `0.01` to `0.1` in production.
+</Note>
+
+---
+
+## Birdwatcher (system debugging)
+
+Birdwatcher is Milvus's built-in diagnostic CLI. It connects directly to etcd and provides commands to inspect internal state without going through the API.
+
+```bash
+# Install
+go install github.com/milvus-io/birdwatcher@latest
+
+# Connect to etcd
+birdwatcher --etcd localhost:2379 --rootPath by-dev
+
+# Common commands inside birdwatcher
+show collections          # List all collections and their state
+show segments             # Inspect segment metadata
+show querycoord-tasks     # View pending query coord tasks
+show channel-watch        # Check channel watching status
+```
+
+<Warning>
+Birdwatcher reads (and can write) directly to etcd, bypassing Milvus's normal API. Use it only for diagnostics. Incorrect writes will corrupt metadata.
+</Warning>
+
+---
+
+## Slow query detection
+
+Milvus logs requests that exceed a configurable threshold:
+
+```yaml
+proxy:
+  slowQuerySpanInSeconds: 1   # Log any Search/Query taking longer than 1s
+```
+
+Slow queries appear in the Milvus logs with level `warn` and include the collection name, number of queries (NQ), and the actual duration. They are also surfaced in the built-in WebUI at `http://localhost:9091/webui`.

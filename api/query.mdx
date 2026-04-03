@@ -1,0 +1,162 @@
+---
+title: "Query"
+description: "Retrieve entities from a Milvus collection using a scalar filter expression, without vector similarity ranking."
+---
+
+The `query` method performs a structured scalar query that returns all entities matching a boolean filter expression. Unlike `search`, there is no vector similarity computation — results are not ranked by distance and are returned in arbitrary order.
+
+Use `query` when you need to retrieve entities by known attribute values, look up entities by primary key, or enumerate records matching a condition for inspection or downstream processing.
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  The name of the collection to query.
+</ParamField>
+
+<ParamField path="filter" type="string" required>
+  A boolean expression that selects entities to return. All entities for which the expression evaluates to `true` are included in the result.
+
+  <Expandable title="Filter expression examples">
+    | Expression | Description |
+    |---|---|
+    | `"id == 42"` | Exact primary key lookup |
+    | `"id in [1, 2, 3]"` | Multiple primary key lookup |
+    | `"category == 'news'"` | String field equality |
+    | `"score > 0.8"` | Numeric comparison |
+    | `"age >= 18 and country == 'US'"` | Compound condition |
+    | `"tags like 'sport%'"` | String prefix match |
+    | `"json_field['key'] == 'value'"` | JSON field access |
+  </Expandable>
+</ParamField>
+
+<ParamField path="output_fields" type="list[string]">
+  The field names to include in each returned entity. Defaults to the primary key field only. Pass `["*"]` to return all fields, including vector fields.
+</ParamField>
+
+<ParamField path="partition_names" type="list[string]">
+  Restrict the query to one or more named partitions. If omitted, all partitions are queried.
+</ParamField>
+
+<ParamField path="limit" type="integer">
+  Maximum number of entities to return. If omitted, all matching entities are returned up to the system maximum (`queryNode.maxTopK`, default 16,384).
+</ParamField>
+
+<ParamField path="offset" type="integer">
+  Number of leading results to skip, for pagination. Use with `limit` to page through a large result set.
+</ParamField>
+
+<ParamField path="consistency_level" type="string">
+  Read consistency guarantee. Options:
+
+  - `"Strong"` — reads reflect all committed writes.
+  - `"Bounded"` (default) — reads may lag by a bounded staleness window.
+  - `"Session"` — reads reflect writes from the same session.
+  - `"Eventually"` — lowest latency; may miss recent writes.
+</ParamField>
+
+## Response
+
+Returns a list of entity dictionaries. Each dictionary contains the requested `output_fields`.
+
+<ResponseField name="id" type="int | str">
+  The primary key value of the matched entity (always included).
+</ResponseField>
+
+<ResponseField name="[field_name]" type="any">
+  One key-value pair per field listed in `output_fields`. The type corresponds to the field's declared schema type.
+</ResponseField>
+
+## Examples
+
+<Tabs>
+  <Tab title="Query by primary key">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    # Look up specific entities by primary key
+    results = client.query(
+        collection_name="my_collection",
+        filter="id in [1, 2, 3]",
+        output_fields=["id", "text", "category"],
+    )
+
+    for entity in results:
+        print(entity)
+    # {"id": 1, "text": "Milvus is a vector database", "category": "tech"}
+    # {"id": 2, "text": "It supports ANN search",        "category": "tech"}
+    # {"id": 3, "text": "Hybrid search combines vectors","category": "tech"}
+    ```
+  </Tab>
+  <Tab title="Query by scalar condition">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    # Retrieve all entities published after 2022 in the "science" category
+    results = client.query(
+        collection_name="my_collection",
+        filter="category == 'science' and year > 2022",
+        output_fields=["id", "title", "year"],
+        limit=100,
+    )
+
+    print(f"Found {len(results)} matching entities")
+    for entity in results:
+        print(entity)
+    ```
+  </Tab>
+  <Tab title="Paginated query">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    page_size = 50
+
+    # Fetch first page
+    page_1 = client.query(
+        collection_name="my_collection",
+        filter="status == 'active'",
+        output_fields=["id", "name"],
+        limit=page_size,
+        offset=0,
+    )
+
+    # Fetch second page
+    page_2 = client.query(
+        collection_name="my_collection",
+        filter="status == 'active'",
+        output_fields=["id", "name"],
+        limit=page_size,
+        offset=page_size,
+    )
+    ```
+  </Tab>
+  <Tab title="Return all fields">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    # Return every field, including vectors
+    results = client.query(
+        collection_name="my_collection",
+        filter="id == 42",
+        output_fields=["*"],
+    )
+
+    print(results[0])
+    ```
+  </Tab>
+</Tabs>
+
+## Notes
+
+- **No ranking**: Query results are not sorted by any relevance or distance score. To retrieve the most similar entities, use `search` instead.
+- **Collection must be loaded**: The collection must be loaded into memory before querying.
+- **Result count**: Without a `limit`, Milvus returns all matching entities, which can be large. Always specify `limit` for exploratory or UI-driven queries.
+- **Vector fields**: Vector field values can be retrieved via `output_fields`, but this increases response size significantly. Only request vectors when needed.
+- **Filter syntax**: The filter expression language is a subset of Python-style boolean expressions. Arithmetic, string, JSON, and array operators are all supported.

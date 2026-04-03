@@ -1,0 +1,236 @@
+---
+title: "Hybrid Search"
+description: "Combine multiple ANN searches across different vector fields and merge results using a reranking strategy."
+---
+
+The `hybrid_search` method executes multiple vector searches in parallel — each targeting a different vector field or using a different query vector — and merges their results using a reranker. This enables multi-vector search patterns such as combining dense semantic embeddings with sparse BM25 representations, or fusing signals from multiple modalities (text, image, etc.).
+
+Each sub-search is specified as an `AnnSearchRequest`. The merged results are ranked by a `RRFRanker` or `WeightedRanker` and the top `limit` entities are returned.
+
+## AnnSearchRequest
+
+Each `AnnSearchRequest` defines a single vector search within the hybrid operation.
+
+<ParamField path="data" type="list[list[float]]" required>
+  Query vectors for this sub-search. Each inner list is one query vector. Typically a list containing a single vector.
+</ParamField>
+
+<ParamField path="anns_field" type="string" required>
+  The name of the vector field to search. Must be an indexed field in the collection.
+</ParamField>
+
+<ParamField path="param" type="dict" required>
+  Search parameters for this sub-search, following the same structure as `search_params` in `search`:
+
+  <Expandable title="properties">
+    <ParamField path="metric_type" type="string">
+      Distance metric matching the index (e.g., `"IP"`, `"L2"`, `"COSINE"`).
+    </ParamField>
+    <ParamField path="params" type="dict">
+      Index-specific parameters (e.g., `{"ef": 64}` for HNSW, `{"nprobe": 10}` for IVF).
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="limit" type="integer" required>
+  The number of candidates to retrieve for this sub-search before reranking. This is the per-sub-search topK; the final number of results after reranking is controlled by the top-level `limit`.
+</ParamField>
+
+<ParamField path="expr" type="string">
+  An optional filter expression applied to this sub-search only.
+</ParamField>
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  The name of the collection to search.
+</ParamField>
+
+<ParamField path="reqs" type="list[AnnSearchRequest]" required>
+  A list of `AnnSearchRequest` objects, one per vector field or search signal to combine.
+</ParamField>
+
+<ParamField path="ranker" type="RRFRanker | WeightedRanker" required>
+  The reranking strategy used to merge results from all sub-searches.
+
+  <Expandable title="RRFRanker">
+    Reciprocal Rank Fusion. Combines ranked lists by summing reciprocal ranks, without requiring normalized scores across searches.
+
+    ```python
+    from pymilvus import RRFRanker
+    ranker = RRFRanker(k=60)  # k controls the rank damping factor (default: 60)
+    ```
+
+    Use RRF when the sub-searches use different metrics or incompatible score scales.
+  </Expandable>
+
+  <Expandable title="WeightedRanker">
+    Weighted sum of normalized scores. Each sub-search contributes to the final score in proportion to its assigned weight.
+
+    ```python
+    from pymilvus import WeightedRanker
+    # Weights correspond to reqs in order; they need not sum to 1
+    ranker = WeightedRanker(0.8, 0.2)  # 80% dense, 20% sparse
+    ```
+
+    Use WeightedRanker when you have meaningful, comparable scores and want explicit control over signal importance.
+  </Expandable>
+</ParamField>
+
+<ParamField path="limit" type="integer" required>
+  The number of final results to return after reranking across all sub-searches.
+</ParamField>
+
+<ParamField path="output_fields" type="list[string]">
+  Scalar (or vector) fields to include in each result entity.
+</ParamField>
+
+<ParamField path="partition_names" type="list[string]">
+  Restrict the search to named partitions. Applies to all sub-searches.
+</ParamField>
+
+<ParamField path="consistency_level" type="string">
+  Read consistency guarantee: `"Strong"`, `"Bounded"` (default), `"Session"`, or `"Eventually"`.
+</ParamField>
+
+## Response
+
+Returns a list of result sets — one per query. Each result set is a list of `SearchResult` objects after reranking.
+
+<ResponseField name="id" type="int | str">
+  The primary key of the matched entity.
+</ResponseField>
+
+<ResponseField name="distance" type="float">
+  The reranked score for this entity. For RRF, this is the fused rank score; for WeightedRanker, this is the weighted sum of normalized distances.
+</ResponseField>
+
+<ResponseField name="entity" type="dict">
+  Values for any requested `output_fields`.
+</ResponseField>
+
+## Examples
+
+<Tabs>
+  <Tab title="Dense + sparse with RRF">
+    ```python
+    from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    # Dense embedding query vector (e.g., from a sentence transformer)
+    dense_query = [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]]
+
+    # Sparse BM25 query vector (e.g., from pymilvus BM25EmbeddingFunction)
+    sparse_query = [{3: 0.8, 17: 0.6, 42: 0.3}]  # sparse format: {token_id: weight}
+
+    # Sub-search 1: dense semantic search
+    dense_req = AnnSearchRequest(
+        data=dense_query,
+        anns_field="dense_vector",
+        param={"metric_type": "COSINE", "params": {"ef": 100}},
+        limit=20,
+    )
+
+    # Sub-search 2: sparse full-text search
+    sparse_req = AnnSearchRequest(
+        data=sparse_query,
+        anns_field="sparse_vector",
+        param={"metric_type": "IP", "params": {}},
+        limit=20,
+    )
+
+    # Merge with Reciprocal Rank Fusion
+    results = client.hybrid_search(
+        collection_name="my_collection",
+        reqs=[dense_req, sparse_req],
+        ranker=RRFRanker(k=60),
+        limit=10,
+        output_fields=["text", "category"],
+    )
+
+    for hit in results[0]:
+        print(f"id={hit['id']}, score={hit['distance']:.4f}, text={hit['entity']['text']}")
+    ```
+  </Tab>
+  <Tab title="Multi-modal with WeightedRanker">
+    ```python
+    from pymilvus import MilvusClient, AnnSearchRequest, WeightedRanker
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    # Text embedding
+    text_query = [[0.3, 0.7, 0.1, 0.5, 0.9]]
+    # Image embedding
+    image_query = [[0.6, 0.2, 0.8, 0.4, 0.1]]
+
+    text_req = AnnSearchRequest(
+        data=text_query,
+        anns_field="text_vector",
+        param={"metric_type": "COSINE", "params": {"ef": 64}},
+        limit=15,
+    )
+
+    image_req = AnnSearchRequest(
+        data=image_query,
+        anns_field="image_vector",
+        param={"metric_type": "L2", "params": {"nprobe": 10}},
+        limit=15,
+    )
+
+    # Weight text results at 70%, image results at 30%
+    results = client.hybrid_search(
+        collection_name="multimodal_collection",
+        reqs=[text_req, image_req],
+        ranker=WeightedRanker(0.7, 0.3),
+        limit=5,
+        output_fields=["title", "url"],
+    )
+
+    for hit in results[0]:
+        print(hit)
+    ```
+  </Tab>
+  <Tab title="Filtered hybrid search">
+    ```python
+    from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker
+
+    client = MilvusClient(uri="http://localhost:19530")
+
+    dense_req = AnnSearchRequest(
+        data=[[0.5, 0.5, 0.5, 0.5, 0.5]],
+        anns_field="dense_vector",
+        param={"metric_type": "COSINE", "params": {"ef": 80}},
+        limit=20,
+        expr="year >= 2023",  # filter applied to this sub-search
+    )
+
+    sparse_req = AnnSearchRequest(
+        data=[{5: 0.9, 22: 0.4}],
+        anns_field="sparse_vector",
+        param={"metric_type": "IP", "params": {}},
+        limit=20,
+        expr="year >= 2023",  # same filter on the sparse sub-search
+    )
+
+    results = client.hybrid_search(
+        collection_name="my_collection",
+        reqs=[dense_req, sparse_req],
+        ranker=RRFRanker(),
+        limit=10,
+        output_fields=["text", "year"],
+    )
+
+    for hit in results[0]:
+        print(hit)
+    ```
+  </Tab>
+</Tabs>
+
+## Notes
+
+- **Multiple vector fields required**: Hybrid search is meaningful only when the collection schema defines two or more vector fields. If only one vector field exists, use `search` instead.
+- **Collection must be loaded**: All target partitions (or the entire collection) must be loaded into memory.
+- **Sub-search `limit` vs. top-level `limit`**: Set each `AnnSearchRequest.limit` to a value larger than the final `limit` to give the ranker a sufficient candidate pool. A common heuristic is to set sub-search limits to at least `limit * 3`.
+- **RRF vs. WeightedRanker**: RRF is metric-agnostic and robust to score distribution differences between sub-searches. WeightedRanker requires scores to be normalized and comparable across sub-searches. Prefer RRF when mixing dense and sparse searches.
+- **Sparse vector format**: Sparse vectors can be provided as a dictionary (`{token_id: weight}`) or as a `scipy.sparse` matrix. Use `pymilvus.model.sparse.BM25EmbeddingFunction` to generate BM25 sparse embeddings from text.

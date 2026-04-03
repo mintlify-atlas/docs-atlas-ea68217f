@@ -1,0 +1,157 @@
+---
+title: "Describe Index"
+description: "Returns metadata and build status for indexes on a collection's fields."
+---
+
+Returns the configuration and current build state of one or more indexes on a collection. Use this to inspect index parameters, confirm that an index finished building, or check progress after calling `create_index`.
+
+## Parameters
+
+<ParamField path="collection_name" type="string" required>
+  Name of the collection whose index information you want to retrieve.
+</ParamField>
+
+<ParamField path="field_name" type="string">
+  Filter results to the index on this field. When omitted, information for all indexed fields in the collection is returned.
+</ParamField>
+
+<ParamField path="index_name" type="string">
+  Filter results to a specific index by name. Useful when a field has more than one index. When omitted, all indexes matching the `field_name` filter (or all indexes in the collection) are returned.
+</ParamField>
+
+## Response
+
+Returns a list of index description objects. Each object contains the following fields:
+
+<ResponseField name="index_name" type="string">
+  Name of the index. Automatically generated if no custom name was supplied at creation time.
+</ResponseField>
+
+<ResponseField name="field_name" type="string">
+  Name of the field this index was built on.
+</ResponseField>
+
+<ResponseField name="index_type" type="string">
+  Algorithm used to build the index, for example `HNSW`, `IVF_FLAT`, or `AUTOINDEX`.
+</ResponseField>
+
+<ResponseField name="metric_type" type="string">
+  Distance metric configured for the index, for example `L2`, `IP`, or `COSINE`. Empty for scalar field indexes.
+</ResponseField>
+
+<ResponseField name="params" type="dict">
+  Index-specific build parameters as key-value pairs, for example `{"M": 16, "efConstruction": 64}` for an HNSW index.
+
+  <Expandable title="example params by index type">
+    | Index type | Example params |
+    |---|---|
+    | `HNSW` | `{"M": 16, "efConstruction": 64}` |
+    | `IVF_FLAT` | `{"nlist": 1024}` |
+    | `IVF_SQ8` | `{"nlist": 1024}` |
+    | `IVF_PQ` | `{"nlist": 1024, "m": 16, "nbits": 8}` |
+    | `FLAT` | `{}` |
+    | `DISKANN` | `{"search_list_size": 100}` |
+    | `BIN_IVF_FLAT` | `{"nlist": 512}` |
+    | `SPARSE_INVERTED_INDEX` | `{}` |
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="state" type="string">
+  Current build state of the index. Possible values:
+
+  - `Unissued` — the build task has been accepted but not yet assigned to a worker node.
+  - `InProgress` — the index is actively being built.
+  - `Finished` — the index is fully built and ready for use.
+  - `Failed` — the build failed. Check collection logs for the reason.
+</ResponseField>
+
+<ResponseField name="indexing_progress" type="number">
+  Percentage of rows that have been indexed so far, as an integer from 0 to 100. Only meaningful when `state` is `InProgress`.
+</ResponseField>
+
+<ResponseField name="indexed_rows" type="number">
+  Number of rows that have been successfully indexed.
+</ResponseField>
+
+<ResponseField name="total_rows" type="number">
+  Total number of rows in the collection at the time the build was initiated.
+</ResponseField>
+
+<ResponseField name="pending_index_rows" type="number">
+  Number of rows not yet indexed. Equals `total_rows - indexed_rows`.
+</ResponseField>
+
+## Examples
+
+<CodeGroup>
+
+```python Describe all indexes on a collection
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+indexes = client.describe_index(collection_name="articles")
+
+for idx in indexes:
+    print(idx)
+```
+
+```python Describe a specific index by name
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+index_info = client.describe_index(
+    collection_name="articles",
+    index_name="embedding_hnsw_idx",
+)
+
+print(index_info)
+# [
+#   {
+#     'index_name': 'embedding_hnsw_idx',
+#     'field_name': 'embedding',
+#     'index_type': 'HNSW',
+#     'metric_type': 'COSINE',
+#     'params': {'M': '16', 'efConstruction': '64'},
+#     'state': 'Finished',
+#     'indexing_progress': 100,
+#     'indexed_rows': 50000,
+#     'total_rows': 50000,
+#     'pending_index_rows': 0,
+#   }
+# ]
+```
+
+```python Wait until an index has finished building
+import time
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+
+collection_name = "articles"
+index_name = "embedding_hnsw_idx"
+
+while True:
+    info = client.describe_index(
+        collection_name=collection_name,
+        index_name=index_name,
+    )
+    state = info[0]["state"]
+    progress = info[0].get("indexing_progress", 0)
+    print(f"State: {state}, progress: {progress}%")
+
+    if state == "Finished":
+        print("Index is ready.")
+        break
+    elif state == "Failed":
+        raise RuntimeError("Index build failed.")
+
+    time.sleep(5)
+```
+
+</CodeGroup>
+
+<Note>
+  `describe_index` returns an empty list when no index exists on the specified field. Use this to verify whether `create_index` has been called before loading a collection.
+</Note>

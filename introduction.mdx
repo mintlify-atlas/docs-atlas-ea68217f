@@ -1,0 +1,112 @@
+---
+title: "Introduction"
+description: "Milvus is a high-performance, cloud-native vector database built for AI-scale similarity search over billions of vectors."
+---
+
+Milvus is an open-source vector database purpose-built for AI applications. It stores and retrieves vector embeddings — the numerical representations of unstructured data like text, images, audio, and video — with low latency at massive scale. Written in Go and C++, Milvus implements hardware acceleration for CPU and GPU to deliver best-in-class vector search performance.
+
+<Tip>
+  Ready to try it? Jump to the [Quickstart](/quickstart) to run Milvus Lite locally with a single `pip install` — no infrastructure required.
+</Tip>
+
+## What you can build with Milvus
+
+Milvus powers a wide range of AI applications across industries:
+
+<CardGroup cols={2}>
+  <Card title="Retrieval-Augmented Generation (RAG)" icon="brain">
+    Store document embeddings and retrieve the most relevant context for LLM prompts. Combine dense vector search with BM25 full-text search for higher recall.
+  </Card>
+  <Card title="Semantic search" icon="magnifying-glass">
+    Move beyond keyword matching. Find documents, products, or records that are conceptually similar to a query, even when exact terms don't match.
+  </Card>
+  <Card title="Recommendation systems" icon="star">
+    Embed user behavior and item features into vectors, then retrieve the nearest neighbors as personalized recommendations at query time.
+  </Card>
+  <Card title="Image and multimodal search" icon="image">
+    Index image embeddings from models like CLIP and search by visual similarity. Combine image, text, and audio vectors in a single collection.
+  </Card>
+</CardGroup>
+
+## Key features
+
+### Multiple vector index types
+
+Milvus supports all major vector index algorithms, letting you choose the right trade-off between search speed, memory usage, and recall:
+
+- **HNSW** — In-memory graph index. Best recall and speed for datasets that fit in RAM.
+- **IVF_FLAT / IVF_PQ / IVF_SQ8** — Inverted-file indexes. Good balance of speed and memory; quantization variants reduce memory at a small recall cost.
+- **DiskANN** — Graph index that spills to disk. Handles datasets larger than available RAM.
+- **SCANN** — Google's scalable ANN algorithm, optimized for high-QPS workloads.
+- **CAGRA (GPU)** — NVIDIA GPU-accelerated graph index via cuVS. Up to 10× faster than CPU indexes for bulk search.
+
+### Hybrid search
+
+Milvus natively combines multiple search strategies in a single query:
+
+- **Dense + sparse vectors** — Run ANN search on dense embeddings and sparse learned embeddings (SPLADE, BGE-M3) simultaneously.
+- **BM25 full-text search** — Built-in tokenization and BM25 scoring for keyword search stored alongside vectors in the same collection.
+- **Reciprocal Rank Fusion (RRF)** — Merge ranked result lists from multiple search requests into a single re-ranked response.
+
+### Distributed, cloud-native architecture
+
+Milvus separates compute from storage and scales each tier independently:
+
+- **Stateless microservices** on Kubernetes — query nodes, data nodes, stream nodes, and coordinators can be scaled horizontally without downtime.
+- **Separate read and write scaling** — add query nodes for read-heavy workloads; add data nodes for write-heavy workloads.
+- **S3-compatible object storage** — data is persisted to MinIO or any S3-compatible store, decoupling durability from compute.
+- **etcd for metadata** — lightweight coordinator state keeps the cluster consistent across failures.
+
+### Security and multi-tenancy
+
+- **Role-Based Access Control (RBAC)** — assign fine-grained privileges to users and roles at the database, collection, or partition level.
+- **TLS encryption** — all intra-cluster and client-facing communication can be encrypted in transit.
+- **Multi-tenancy isolation** — isolate tenants at the database, collection, partition, or partition-key level within a single cluster.
+- **Hot/cold storage tiering** — keep frequently accessed data in memory or on SSD; archive cold data to cost-effective object storage.
+
+## Deployment modes
+
+Choose the deployment that fits your scale:
+
+<CardGroup cols={3}>
+  <Card title="Milvus Lite" icon="laptop" href="/quickstart">
+    Embedded Python library. Stores data in a local file. No Docker or Kubernetes required. Ideal for notebooks, local development, and small datasets.
+  </Card>
+  <Card title="Milvus Standalone" icon="server" href="/install-standalone">
+    Single-node Docker Compose deployment. Includes etcd and MinIO as companion services. Suitable for development servers and small production workloads.
+  </Card>
+  <Card title="Milvus Cluster" icon="cloud" href="/install-cluster">
+    Fully distributed Kubernetes deployment. Scales horizontally to billions of vectors and tens of thousands of QPS. Designed for production at scale.
+  </Card>
+</CardGroup>
+
+<Note>
+  All three modes share the same `pymilvus` SDK and the same MilvusClient API. You can develop locally with Milvus Lite and deploy to Standalone or Cluster without changing your application code.
+</Note>
+
+## Ecosystem and integrations
+
+Milvus integrates with the leading AI development frameworks:
+
+- **LangChain** and **LlamaIndex** — drop-in vector store for RAG pipelines
+- **OpenAI**, **HuggingFace**, **Cohere** — embedding models via `pymilvus[model]`
+- **Spark**, **Kafka**, **Airbyte**, **Fivetran** — data pipeline connectors
+- **Prometheus / Grafana** — metrics and alerting
+- **Attu** — open-source GUI for cluster management
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first vector search in under five minutes using Milvus Lite.
+  </Card>
+  <Card title="Install Standalone" icon="server" href="/install-standalone">
+    Deploy Milvus with Docker Compose for a persistent single-node server.
+  </Card>
+  <Card title="Install Cluster" icon="cloud" href="/install-cluster">
+    Deploy a distributed Milvus cluster on Kubernetes with Helm.
+  </Card>
+  <Card title="Core concepts" icon="book" href="/concepts/architecture">
+    Learn how Milvus organizes data and processes queries internally.
+  </Card>
+</CardGroup>

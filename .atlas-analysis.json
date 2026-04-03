@@ -1,28 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Milvus",
+  "projectType": "data-platform",
+  "projectName": "Milvus",
+  "projectDescription": "A high-performance, cloud-native vector database built for scalable AI-powered similarity search over billions of vectors.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#54c2f3",
-    "light": "#a2ddef",
-    "dark": "#04b4fc"
-  },
-  "favicon": "/favicon.svg",
-  "logo": {
-    "light": "https://media.brand.dev/13d023fd-8695-4c93-990e-9a2279027403.svg",
-    "dark": "https://media.brand.dev/13d023fd-8695-4c93-990e-9a2279027403.svg"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/milvus-io/milvus"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/milvus-io/milvus"
-    }
-  },
+  "primaryColor": "#54c2f3",
+  "lightColor": "#a2ddef",
+  "darkColor": "#04b4fc",
   "navigation": {
     "tabs": [
       {
@@ -117,5 +100,30 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "High-performance ANN vector search with HNSW, IVF, DiskANN, SCANN index support",
+    "Distributed cloud-native architecture with horizontal scaling",
+    "Hybrid search combining dense vectors, sparse vectors, and full-text BM25 search",
+    "GPU acceleration with NVIDIA CAGRA support",
+    "Multi-tenancy with database, collection, and partition-level isolation",
+    "Role-Based Access Control (RBAC) and TLS encryption",
+    "Real-time streaming data ingestion with strong consistency guarantees",
+    "Hot/cold tiered storage for cost-effective data management",
+    "Milvus Lite for local development and Standalone mode for single-node deployment"
+  ],
+  "publicApiSurface": [
+    "CreateCollection / DropCollection / DescribeCollection / ShowCollections",
+    "Insert / Upsert / Delete / Flush",
+    "Search (ANN vector search with metadata filtering)",
+    "Query (scalar filter queries)",
+    "HybridSearch (multi-vector / sparse+dense search)",
+    "CreateIndex / DescribeIndex / DropIndex",
+    "CreatePartition / DropPartition / LoadPartition",
+    "CreateDatabase / DropDatabase",
+    "CreateUser / CreateRole / GrantPrivilege (RBAC)",
+    "LoadCollection / ReleaseCollection",
+    "BulkInsert (batch data import)",
+    "GetFlushState / GetLoadState"
+  ]
 }

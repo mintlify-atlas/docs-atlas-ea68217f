@@ -1,0 +1,273 @@
+---
+title: "Authentication"
+description: "Enable user authentication, manage credentials, and configure TLS for secure Milvus connections."
+---
+
+By default, Milvus does not require authentication. This page explains how to enable it, create users, and establish encrypted connections with TLS.
+
+---
+
+## Enabling authentication
+
+Set `common.security.authorizationEnabled` to `true` in `milvus.yaml` and restart Milvus:
+
+```yaml
+common:
+  security:
+    authorizationEnabled: true
+    defaultRootPassword: Milvus    # Change this before enabling auth in production
+```
+
+<Warning>
+Change `defaultRootPassword` before enabling authentication. The default value `Milvus` is well-known and must not be used in production.
+</Warning>
+
+Once enabled, all clients must supply credentials. Unauthenticated connections are rejected.
+
+---
+
+## Default superuser
+
+Milvus creates one built-in user at startup:
+
+| Field | Value |
+|---|---|
+| Username | `root` |
+| Default password | `Milvus` |
+| Role | Superuser — bypasses all RBAC checks |
+
+---
+
+## Connecting with credentials
+
+<CodeGroup>
+
+```python python (MilvusClient)
+from pymilvus import MilvusClient
+
+# Token format: "username:password"
+client = MilvusClient(
+    uri="http://localhost:19530",
+    token="root:Milvus"
+)
+```
+
+```python python (connections API)
+from pymilvus import connections
+
+connections.connect(
+    alias="default",
+    host="localhost",
+    port="19530",
+    user="root",
+    password="Milvus"
+)
+```
+
+```python Zilliz Cloud (API key)
+from pymilvus import MilvusClient
+
+# Use an API key instead of username:password for Zilliz Cloud
+client = MilvusClient(
+    uri="https://your-cluster.zillizcloud.com",
+    token="your-api-key"
+)
+```
+
+</CodeGroup>
+
+---
+
+## Managing users
+
+### Create a user
+
+<Steps>
+  <Step title="Connect as root">
+    ```python
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri="http://localhost:19530", token="root:Milvus")
+    ```
+  </Step>
+  <Step title="Create the new user">
+    ```python
+    client.create_user(user_name="alice", password="StrongPass1!")
+    ```
+  </Step>
+  <Step title="Verify the user was created">
+    ```python
+    print(client.list_users())
+    # ['root', 'alice']
+    ```
+  </Step>
+</Steps>
+
+### Update a password
+
+```python
+client.update_password(
+    user_name="alice",
+    old_password="StrongPass1!",
+    new_password="NewStrongPass2!"
+)
+```
+
+### Delete a user
+
+```python
+client.drop_user(user_name="alice")
+```
+
+<Note>
+The `root` user cannot be deleted. Roles and privileges are managed separately — see [Access Control (RBAC)](/operations/access-control).
+</Note>
+
+---
+
+## TLS/SSL
+
+TLS encrypts traffic between clients and the Milvus proxy. Milvus supports both one-way and mutual (two-way) TLS.
+
+### Generate certificates
+
+<Steps>
+  <Step title="Install OpenSSL">
+    ```bash
+    # Ubuntu / Debian
+    sudo apt install openssl
+
+    openssl version   # Verify installation
+    ```
+  </Step>
+  <Step title="Create the configuration and generation script">
+    Create a working directory and the two files below:
+
+    ```bash
+    mkdir cert && cd cert
+    ```
+
+    Save the following as `gen.sh`:
+
+    ```bash
+    #!/usr/bin/env sh
+    Country="US"
+    State="California"
+    Location="San Francisco"
+    Organization="myorg"
+    OrganizationUnit="engineering"
+    CommonName="localhost"   # Must match the server hostname clients will connect to
+
+    # CA
+    openssl genpkey -algorithm RSA -out ca.key
+    openssl req -new -x509 -key ca.key -out ca.pem -days 3650 \
+      -subj "/C=$Country/ST=$State/L=$Location/O=$Organization/OU=$OrganizationUnit/CN=$CommonName"
+
+    # Server certificate
+    openssl genpkey -algorithm RSA -out server.key
+    openssl req -new -nodes -key server.key -out server.csr -days 3650 \
+      -subj "/C=$Country/O=$Organization/OU=$OrganizationUnit/CN=$CommonName" \
+      -config ./openssl.cnf -extensions v3_req
+    openssl x509 -req -days 3650 -in server.csr -out server.pem \
+      -CA ca.pem -CAkey ca.key -CAcreateserial \
+      -extfile ./openssl.cnf -extensions v3_req
+
+    # Client certificate (required for mutual TLS only)
+    openssl genpkey -algorithm RSA -out client.key
+    openssl req -new -nodes -key client.key -out client.csr -days 3650 \
+      -subj "/C=$Country/O=$Organization/OU=$OrganizationUnit/CN=$CommonName" \
+      -config ./openssl.cnf -extensions v3_req
+    openssl x509 -req -days 3650 -in client.csr -out client.pem \
+      -CA ca.pem -CAkey ca.key -CAcreateserial \
+      -extfile ./openssl.cnf -extensions v3_req
+    ```
+  </Step>
+  <Step title="Run the script">
+    ```bash
+    chmod +x gen.sh
+    ./gen.sh
+    ```
+
+    This produces: `ca.key`, `ca.pem`, `server.key`, `server.pem`, `client.key`, `client.pem`.
+  </Step>
+</Steps>
+
+### Configure Milvus for TLS
+
+<Tabs>
+  <Tab title="One-way TLS (server authenticates)">
+    The client verifies the server certificate. No client certificate is required.
+
+    ```yaml
+    # milvus.yaml
+    tls:
+      serverPemPath: configs/cert/server.pem
+      serverKeyPath: configs/cert/server.key
+      caPemPath: configs/cert/ca.pem
+
+    common:
+      security:
+        tlsMode: 1    # 1 = one-way TLS
+    ```
+
+    **Client connection:**
+
+    ```python
+    from pymilvus import connections
+
+    connections.connect(
+        host="127.0.0.1",
+        port="19530",
+        secure=True,
+        server_pem_path="cert/server.pem",
+        server_name="localhost"   # Must match CommonName in the server cert
+    )
+    ```
+  </Tab>
+  <Tab title="Mutual TLS (both sides authenticate)">
+    Both the client and server present certificates. Use this for the highest security.
+
+    ```yaml
+    # milvus.yaml
+    tls:
+      serverPemPath: configs/cert/server.pem
+      serverKeyPath: configs/cert/server.key
+      caPemPath: configs/cert/ca.pem
+
+    common:
+      security:
+        tlsMode: 2    # 2 = mutual TLS
+    ```
+
+    **Client connection:**
+
+    ```python
+    from pymilvus import connections
+
+    connections.connect(
+        host="127.0.0.1",
+        port="19530",
+        secure=True,
+        client_pem_path="cert/client.pem",
+        client_key_path="cert/client.key",
+        ca_pem_path="cert/ca.pem",
+        server_name="localhost"
+    )
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+`tlsMode` requires a Milvus restart. Ensure certificates are mounted and readable by the Milvus process before restarting.
+</Warning>
+
+---
+
+## Token format reference
+
+| Deployment | Token value |
+|---|---|
+| Self-hosted Milvus | `"username:password"` |
+| Zilliz Cloud | API key from the Zilliz Cloud console |
+
+The token is passed as the `token` parameter in `MilvusClient`, or as the `Authorization: Bearer <token>` HTTP header for RESTful API calls.

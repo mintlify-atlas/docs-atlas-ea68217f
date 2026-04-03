@@ -1,0 +1,211 @@
+---
+title: "Hybrid Search"
+description: "Combine multiple vector fields in a single query using Reciprocal Rank Fusion or weighted reranking. Ideal for RAG and multimodal search."
+---
+
+Hybrid search combines results from multiple ANN searches — each over a different vector field — and merges them into a single ranked list using a reranking strategy. This improves recall and result quality compared to searching a single vector field alone.
+
+## When to use hybrid search
+
+| Use case | Vector fields |
+|---|---|
+| RAG with keyword boost | Dense embedding + sparse BM25 vector |
+| Multimodal retrieval | Image embedding + text embedding |
+| Multi-granularity search | Sentence-level + document-level embeddings |
+| Domain-adapted retrieval | General embedding + fine-tuned domain embedding |
+
+<Tip>
+  The most common hybrid search pattern for RAG is combining a **dense semantic embedding** with a **sparse BM25 vector**. Dense embeddings capture meaning; sparse vectors capture exact keyword matches. Together they produce better recall than either alone.
+</Tip>
+
+## Collection setup for hybrid search
+
+Your collection schema must include at least two vector fields.
+
+```python
+from pymilvus import MilvusClient, DataType
+
+client = MilvusClient("milvus_demo.db")
+
+schema = client.create_schema(auto_id=True, enable_dynamic_field=False)
+
+schema.add_field("id",             DataType.INT64,           is_primary=True)
+schema.add_field("text",           DataType.VARCHAR,          max_length=2048)
+
+# Dense vector field for semantic search
+schema.add_field("dense_vector",   DataType.FLOAT_VECTOR,    dim=768)
+
+# Sparse vector field for BM25 / SPLADE
+schema.add_field("sparse_vector",  DataType.SPARSE_FLOAT_VECTOR)
+
+index_params = client.prepare_index_params()
+
+index_params.add_index(
+    field_name="dense_vector",
+    index_type="HNSW",
+    metric_type="COSINE",
+    params={"M": 16, "efConstruction": 200},
+)
+
+index_params.add_index(
+    field_name="sparse_vector",
+    index_type="SPARSE_INVERTED_INDEX",
+    metric_type="IP",
+)
+
+client.create_collection(
+    collection_name="articles",
+    schema=schema,
+    index_params=index_params,
+)
+```
+
+## Run a hybrid search
+
+<Steps>
+  <Step title="Build an AnnSearchRequest for each vector field">
+    `AnnSearchRequest` wraps the query vector and search parameters for one vector field.
+
+    ```python
+    from pymilvus import AnnSearchRequest
+
+    # Dense ANN request
+    dense_request = AnnSearchRequest(
+        data=[[0.12, 0.34, ..., 0.56]],      # dense query vector
+        anns_field="dense_vector",
+        param={"metric_type": "COSINE", "params": {"ef": 100}},
+        limit=20,
+    )
+
+    # Sparse ANN request (BM25-style query vector)
+    sparse_request = AnnSearchRequest(
+        data=[{15: 0.8, 42: 0.6, 101: 0.4}], # sparse query vector (token_id: weight)
+        anns_field="sparse_vector",
+        param={"metric_type": "IP"},
+        limit=20,
+    )
+    ```
+
+    <Note>
+      Set `limit` on each `AnnSearchRequest` higher than your final `limit` to give the reranker more candidates to work with. A common rule of thumb is to request 2–5× your final topK per sub-search.
+    </Note>
+  </Step>
+
+  <Step title="Choose a reranking strategy">
+    Milvus provides two built-in rerankers.
+
+    <Tabs>
+      <Tab title="RRFRanker">
+        Reciprocal Rank Fusion (RRF) merges ranked lists by summing reciprocal ranks. It does not require score normalization and works well when the two search spaces have very different score distributions.
+
+        ```python
+        from pymilvus import RRFRanker
+
+        ranker = RRFRanker(k=60)  # k is the RRF constant (default 60)
+        ```
+
+        The RRF score for an entity is:
+
+        ```
+        score = Σ 1 / (k + rank_i)
+        ```
+
+        where `rank_i` is the entity's rank in the i-th search result list.
+      </Tab>
+      <Tab title="WeightedRanker">
+        Weighted averaging normalizes scores from each vector field and combines them with explicit weights. Use this when you know the relative importance of each vector field.
+
+        ```python
+        from pymilvus import WeightedRanker
+
+        # Weights must sum to 1.0; order matches the order of AnnSearchRequests
+        ranker = WeightedRanker(0.7, 0.3)   # 70% dense, 30% sparse
+        ```
+
+        <Note>
+          `WeightedRanker` normalizes scores within each result list before combining, so different score scales between fields are handled automatically.
+        </Note>
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Call hybrid_search">
+    ```python
+    results = client.hybrid_search(
+        collection_name="articles",
+        reqs=[dense_request, sparse_request],
+        ranker=ranker,
+        limit=10,
+        output_fields=["text"],
+    )
+
+    for hits in results:
+        for hit in hits:
+            print(f"id={hit['id']}  score={hit['distance']:.4f}  text={hit['entity']['text'][:80]}")
+    ```
+  </Step>
+</Steps>
+
+## Complete example: dense + sparse hybrid search for RAG
+
+```python
+from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker
+
+client = MilvusClient("milvus_demo.db")
+
+# Assume dense_query_vec comes from an embedding model (e.g., OpenAI, BGE)
+# and sparse_query_vec comes from a BM25 tokenizer
+dense_query_vec  = embed_model.encode("What is Milvus?")
+sparse_query_vec = bm25_model.encode("What is Milvus?")  # dict of {token_id: weight}
+
+dense_req = AnnSearchRequest(
+    data=[dense_query_vec],
+    anns_field="dense_vector",
+    param={"metric_type": "COSINE", "params": {"ef": 100}},
+    limit=20,
+)
+
+sparse_req = AnnSearchRequest(
+    data=[sparse_query_vec],
+    anns_field="sparse_vector",
+    param={"metric_type": "IP"},
+    limit=20,
+)
+
+results = client.hybrid_search(
+    collection_name="articles",
+    reqs=[dense_req, sparse_req],
+    ranker=RRFRanker(k=60),
+    limit=5,
+    output_fields=["text"],
+)
+
+context_passages = [hit["entity"]["text"] for hit in results[0]]
+```
+
+## Result merging and score normalization
+
+- **RRFRanker**: No normalization needed. Scores are computed purely from rank positions and are always in the range `(0, 1/k]`.
+- **WeightedRanker**: Each result list is normalized to `[0, 1]` using min-max scaling before weights are applied. The final score is a weighted average of the normalized scores.
+
+In both cases, the final list is sorted in descending order of the combined score.
+
+<ParamField body="reqs" type="list[AnnSearchRequest]" required>
+  A list of `AnnSearchRequest` objects, one per vector field to search.
+</ParamField>
+
+<ParamField body="ranker" type="RRFRanker | WeightedRanker" required>
+  The reranking strategy used to merge results from each sub-search.
+</ParamField>
+
+<ParamField body="limit" type="int" required>
+  The total number of results to return after reranking.
+</ParamField>
+
+<ParamField body="output_fields" type="list[str]">
+  Scalar fields to return in the result.
+</ParamField>
+
+<ParamField body="filter" type="string">
+  Boolean filter expression applied to all sub-searches before reranking.
+</ParamField>
